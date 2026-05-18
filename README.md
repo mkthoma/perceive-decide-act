@@ -484,7 +484,7 @@ If all router providers are unavailable, it falls back to the token-count rule �
 
 ## Running the four target queries
 
-> **Reset state between fresh attempts:**
+**Reset state between fresh attempts:**
 > ```bash
 > rm -rf state/
 > ```
@@ -495,27 +495,85 @@ If all router providers are unavailable, it falls back to the token-count rule �
 uv run python agent.py "Fetch https://en.wikipedia.org/wiki/Claude_Shannon and tell me his birth date, death date, and three key contributions to information theory."
 ```
 
-**What to expect (3 iterations):**
+**What to expect:**
 ```
-[agent] run_id=<id>
+[agent] run_id=0c583d95
+[agent] query: Fetch https://en.wikipedia.org/wiki/Claude_Shannon and tell me his birth date, death date, and three key contributions to information theory.
+
 
 --- iter 1 ---
-  [open] Fetch the Wikipedia page for Claude Shannon
-  [open] Extract birth date, death date, and three contributions
+  [open] Fetch https://en.wikipedia.org/wiki/Claude_Shannon and tell me his birth date, death date, and three key contributions to information theory.
   [decision] TOOL_CALL: fetch_url({'url': 'https://en.wikipedia.org/wiki/Claude_Shannon'})
-  [action] -> [artifact art:09ff..., 50,463 bytes] ...
+  [action] -> [artifact art:4c16324bec189785, 50,463 bytes] preview: Jump to content Search Search Claude Shannon 68 languages Afrikaa
 
 --- iter 2 ---
-  [done] Fetch the Wikipedia page for Claude Shannon
-  [open] Extract birth date, death date, and three contributions  attach=art:09ff...
-  [attach] art:09ff... (50,463 bytes)
-  [decision] ANSWER: Claude Shannon (April 30, 1916 - February 24, 2001)...
+  [open] Fetch https://en.wikipedia.org/wiki/Claude_Shannon and tell me his birth date, death date, and three key contributions to information theory.
+  [decision] TOOL_CALL: read_file({'path': 'art:4c16324bec189785'})
+  [action] -> [ERROR] 'read_file' received an artifact handle (art:...) as a path or URL argument. Artifact content is injected via AT
 
 --- iter 3 ---
-  [done] Fetch the Wikipedia page for Claude Shannon
-  [done] Extract birth date, death date, and three contributions
+  [open] Fetch https://en.wikipedia.org/wiki/Claude_Shannon and tell me his birth date, death date, and three key contributions to information theory.
+  [decision] TOOL_CALL: read_file({'path': 'art:4c16324bec189785'})
+  [action] -> [ERROR] 'read_file' received an artifact handle (art:...) as a path or URL argument. Artifact content is injected via AT
+
+--- iter 4 ---
+  [open] Fetch https://en.wikipedia.org/wiki/Claude_Shannon and tell me his birth date, death date, and three key contributions to information theory.
+  [decision] TOOL_CALL: read_file({'path': 'art:4c16324bec189785'})
+  [action] -> [ERROR] 'read_file' received an artifact handle (art:...) as a path or URL argument. Artifact content is injected via AT
+
+--- iter 5 ---
+  [open] Fetch https://en.wikipedia.org/wiki/Claude_Shannon and tell me his birth date, death date, and three key contributions to information theory.
+  [decision] TOOL_CALL: read_file({'path': 'art:4c16324bec189785'})
+  [action] -> [ERROR] 'read_file' received an artifact handle (art:...) as a path or URL argument. Artifact content is injected via AT
+
+--- iter 6 ---
+  [open] Fetch https://en.wikipedia.org/wiki/Claude_Shannon and tell me his birth date, death date, and three key contributions to information theory.
+  [decision] TOOL_CALL: read_file({'path': 'art:4c16324bec189785'})
+  [action] -> [ERROR] 'read_file' received an artifact handle (art:...) as a path or URL argument. Artifact content is injected via AT
+
+--- iter 7 ---
+  [open] Fetch https://en.wikipedia.org/wiki/Claude_Shannon and tell me his birth date, death date, and three key contributions to information theory.
+  [decision] ANSWER: I see the artifact from the fetch is already attached. Let me look at its contents directly.
+
+The artifact `art:4c16324bec189785` contains the fetched Wikipedia page. Since I can see the preview, I ha...
+
+--- iter 8 ---
+  [open] Extract birth date, death date, and information theory contributions from the fetched artifact.  attach=art:4c16324bec189785
+  [attach] art:4c16324bec189785 (50,463 bytes)
+  [decision] ANSWER: Based on the provided artifact, here are the details regarding Claude Shannon:
+
+*   **Birth Date:** April 30, 1916
+*   **Death Date:** February 24, 2001
+
+**Contributions to Information Theory:**
+1.  *...
+
+--- iter 9 ---
+  [open] Extract birth date, death date, and information theory contributions from the fetched artifact.  attach=art:4c16324bec189785
+  [attach] art:4c16324bec189785 (50,463 bytes)
+  [decision] ANSWER: Based on the fetched Wikipedia article (artifact `art:4c16324bec189785`), here are the requested details about Claude Shannon:
+
+1. **Birth Date:** April 30, 1916
+2. **Death Date:** February 24, 2001
+3...
+
+--- iter 10 ---
+  [done] Extract birth date, death date, and information theory contributions from the fetched artifact.  attach=art:4c16324bec189785
 
 [done] all goals satisfied
+
+============================================================
+FINAL ANSWER
+============================================================
+Based on the fetched Wikipedia article (artifact `art:4c16324bec189785`), here are the requested details about Claude Shannon:
+
+1. **Birth Date:** April 30, 1916
+2. **Death Date:** February 24, 2001
+3. **Information Theory Contributions:**
+   - **Founding of Information Theory:** Shannon published "A Mathematical Theory of Communication" in 1948, which laid the foundations for the entire field of information theory. In this work, he developed **information entropy** as a measure of the information content in a message, formally introduced the term **"bit,"** and established the fundamental limits of data compression and reliable communication.
+   - **Cryptography:** During and after World War II, Shannon produced foundational work in modern cryptography. His 1949 paper "Communication Theory of Secrecy Systems" mathematically proved that the **one-time pad** is unbreakable and established principles that underpin modern symmetric-key cryptography (such as DES and AES).
+   - **Noisy-Channel Coding & Sampling:** He wrote a classic 1956 paper on coding for a noisy channel, and is credited with introducing the **Nyquist–Shannon sampling theorem** (derived as early as 1940), which is essential for converting continuous analog signals into discrete digital signals and enabling modern digital telecommunications.
+
 ```
 
 This query tests that Perception detects the fetch goal is done, sets `attach_artifact_id` on the extraction goal, and Decision receives the page bytes directly rather than re-fetching.
@@ -528,25 +586,69 @@ This query tests that Perception detects the fetch goal is done, sets `attach_ar
 uv run python agent.py "Find 3 family-friendly things to do in Tokyo this weekend. Check Saturday's weather forecast there and tell me which one is most appropriate."
 ```
 
-**What to expect (≤ 6 iterations):**
+**What to expect:**
 ```
 --- iter 1 ---
-  [open] Find 3 family-friendly things to do in Tokyo
-  [open] Check Saturday weather forecast for Tokyo
-  [open] Choose the most appropriate activity given the weather
-  [decision] TOOL_CALL: web_search(...)
+  [open] Find 3 family-friendly things to do in Tokyo this weekend. Check Saturday's weather forecast there and tell me which one is most appropriate.
+  [decision] TOOL_CALL: web_search({'query': 'family-friendly things to do in Tokyo this weekend'})
+  [action] -> [artifact art:5eeed098d50a9b64, 10,329 bytes] preview: Title: The best Tokyo Family-friendly activities 2026 - Free canc
 
---- iter 2-3 ---
-  [done] Find 3 family-friendly activities
-  [open] Check Saturday weather ...
+--- iter 2 ---
+  [open] Find 3 family-friendly things to do in Tokyo this weekend. Check Saturday's weather forecast there and tell me which one is most appropriate.
+  [decision] TOOL_CALL: web_search({'query': 'weather forecast Tokyo Saturday March 8 2026'})
+  [action] -> Title: Weather in Tokyo
+URL:   https://www.weatherapi.com/
+Snippet: {'location': {'name': 'Tokyo', 'region': 'Tokyo', 'c
 
---- iter 4-5 ---
-  [done] Find + weather
-  [open] Choose most appropriate activity ...
-  [decision] ANSWER: Given Saturday's forecast of [weather], ...
+--- iter 3 ---
+  [open] Find 3 family-friendly things to do in Tokyo this weekend. Check Saturday's weather forecast there and tell me which one is most appropriate.
+  [decision] TOOL_CALL: read_file({'path': 'art:a84dc26ae28c6bc7'})
+  [action] -> [ERROR] 'read_file' received an artifact handle (art:...) as a path or URL argument. Artifact content is injected via AT
+
+--- iter 4 ---
+  [open] Identify 3 family-friendly activities in Tokyo using information from artifact 2.  attach=art:5eeed098d50a9b64
+  [open] Extract Tokyo weather forecast for Saturday from artifact 3.  attach=art:a84dc26ae28c6bc7
+  [open] Synthesize the activities and weather to recommend the best option.
+  [attach] art:5eeed098d50a9b64 (10,329 bytes)
+  [decision] ANSWER: Based on the information provided in the artifacts, here are three family-friendly activities in Tokyo:
+
+1.  **Niko Niko Park:** This is a recommended outdoor destination for families, particularly be...
+
+--- iter 5 ---
+  [done] Identify 3 family-friendly activities in Tokyo using information from artifact 2.  attach=art:5eeed098d50a9b64
+  [done] Extract Tokyo weather forecast for Saturday from artifact 3.  attach=art:a84dc26ae28c6bc7
+  [open] Synthesize the activities and weather to recommend the best option.
+  [force-attach] art:a84dc26ae28c6bc7 (5,557 bytes)
+  [decision] ANSWER: Based on family-friendly activity options in Tokyo and the typical weather for late May 2026, here is a recommendation for your weekend:
+
+### Recommended Activity: Outdoor Parks (e.g., Niko Niko Park)...
+
+--- iter 6 ---
+  [done] Identify 3 family-friendly activities in Tokyo using information from artifact 2.
+  [done] Extract Tokyo weather forecast for Saturday from artifact 3.
+  [done] Synthesize the activities and weather to recommend the best option.
+
+[done] all goals satisfied
+
+============================================================
+FINAL ANSWER
+============================================================
+Based on family-friendly activity options in Tokyo and the typical weather for late May 2026, here is a recommendation for your weekend:
+
+### Recommended Activity: Outdoor Parks (e.g., Niko Niko Park)
+Given that late May in Tokyo typically features mild, pleasant temperatures (averaging between 20°C and 25°C), outdoor activities are an excellent choice.
+*   **Why it's a great option:** Parks like **Niko Niko Park** in Aoyama are perfect for families. The mild weather allows children to enjoy the outdoor playground equipment comfortably without the extreme heat of mid-summer or the chill of winter.
+*   **Tip:** Since the weather during this time of year is generally mild but can sometimes include breezy or slightly moist conditions, it is advisable to dress in light layers so you can easily adjust to the temperature throughout the day.
+
+### Alternative Options
+If you are looking for a variety of experiences, consider these two additional recommendations:
+1.  **Tokyo Toy Museum:** This is an excellent "indoor" backup option if the weather forecast shifts toward rain or becomes uncomfortably humid. It is highly interactive and specifically designed for families with children of various ages.
+2.  **Ueno Park & Zoo:** This is a classic family destination. It offers a blend of outdoor walking space (the park) and indoor/contained exhibits (the zoo and nearby museums), making it a versatile choice that can accommodate slight fluctuations in the day's weather.
+
+**Summary Recommendation:**
+For the best experience this weekend, prioritize **outdoor park visits** during the midday hours when the sun is out and the temperatures are at their peak (around 22°C–25°C). Keep the **Tokyo Toy Museum** in mind as a reliable indoor alternative if the weather turns damp or windy.
+
 ```
-
----
 
 ### Query C — Mom's birthday (durable memory across runs)
 
@@ -556,14 +658,8 @@ uv run python agent.py "My mom's birthday is 15 May 2026. Remember that and give
 ```
 
 ```
-[memory.remember] -> classified as fact, keywords: [mom, birthday, may, 2026]
---- iter 1 ---
-  [open] Record mom's birthday (15 May 2026) in memory
-  [open] Create reminder for 1 May 2026 (two weeks before)
-  [open] Create reminder for 15 May 2026
-  [decision] TOOL_CALL: create_file(...)
-...
-FINAL ANSWER: Reminders created. Mom's birthday on 15 May 2026 is recorded.
+
+
 ```
 
 **Run 2** — recall from memory (do not clear `state/` between runs):
@@ -572,11 +668,8 @@ uv run python agent.py "When is mom's birthday?"
 ```
 
 ```
---- iter 1 ---
-  [open] Answer when mom's birthday is
-  [decision] ANSWER: Mom's birthday is on 15 May 2026.
 
-[done] all goals satisfied
+
 ```
 
 Memory hit at iter 1 means the agent answered without any tool call — the fact was retrieved from `state/memory.json`.
@@ -591,24 +684,8 @@ uv run python agent.py "Search for 'Python asyncio best practices', read the top
 
 **What to expect (5–7 iterations):**
 ```
---- iter 1 ---
-  [open] Search for Python asyncio best practices
-  [open] Fetch the top 3 search results
-  [open] Synthesise the common advice into a numbered list
-  [decision] TOOL_CALL: web_search(...)
 
---- iter 2-4 ---
-  [done] Search
-  [open] Fetch top 3 results (fetches each URL -> artifacts)
 
---- iter 5 ---
-  [done] Search + fetch
-  [open] Synthesise common advice
-  [force-attach] art:... (... bytes)
-  [decision] ANSWER:
-    1. Use asyncio.run() as the single program entry point
-    2. Prefer asyncio.gather() or TaskGroup for concurrent coroutines
-    ...
 ```
 
 The `[force-attach]` line means the synthesis safety net fired — Perception hadn't set an explicit `attach_artifact_id`, but `agent.py` detected the synthesis keyword in the goal text and auto-attached the most recent artifact.
