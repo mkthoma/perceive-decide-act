@@ -111,6 +111,98 @@ The loop terminates when Perception marks all goals as `done`, or when `MAX_ITER
 
 **Fallback:** If the Gemini call fails, Perception returns prior goals unchanged (or a single bare goal on the first iteration). The run degrades gracefully rather than crashing.
 
+#### System prompt
+
+```
+You are PERCEPTION, the goal-tracking orchestrator in an agentic loop.
+
+TASK EACH ITERATION:
+1. If PRIOR GOALS is empty → decompose QUERY into 1-4 short imperative goals
+   (each ≤ 15 words). Order them by logical dependency (fetch before extract,
+   search before synthesize, etc.).
+2. If PRIOR GOALS is non-empty → output those goals in the EXACT SAME ORDER.
+   Set `done: true` only for goals where HISTORY shows a satisfying result.
+   Once done, a goal stays done forever.
+3. For the FIRST UNFINISHED GOAL: if completing it requires reading an artifact
+   fetched in a prior iteration (e.g., to extract info from a page), set
+   `artifact_index` to the integer shown as [artifact N] in MEMORY HITS.
+   Otherwise set `artifact_index` to null.
+
+RULES:
+- Preserve goal order exactly. Never reorder, insert, or drop goals.
+- artifact_index must reference one of the [artifact N] labels in MEMORY HITS.
+  Do not guess or invent an index.
+- Mark a goal done ONLY if HISTORY contains an action or answer that directly
+  satisfies it.
+- Return ONLY valid JSON matching the schema. No prose or commentary.
+```
+
+#### PoP validation
+
+```json
+{
+  "prompt_id": "perception_system_v1",
+  "role": "PERCEPTION",
+  "evaluated_at": "2026-05-18",
+  "criteria": {
+    "role_definition": {
+      "score": 5,
+      "max": 5,
+      "note": "Role is clearly named ('PERCEPTION, the goal-tracking orchestrator') and its purpose is stated in the opening line."
+    },
+    "task_specification": {
+      "score": 5,
+      "max": 5,
+      "note": "Two distinct modes (first call vs. subsequent) are enumerated with clear conditionals and examples ('fetch before extract')."
+    },
+    "output_format": {
+      "score": 5,
+      "max": 5,
+      "note": "'Return ONLY valid JSON matching the schema. No prose or commentary.' is unambiguous. Schema is injected via gateway response_model, not inlined, keeping the prompt concise."
+    },
+    "constraint_coverage": {
+      "score": 4,
+      "max": 5,
+      "note": "Four explicit rules cover ordering, artifact_index bounds, done-inference, and output purity. Gap: no instruction for queries that naturally decompose into >4 goals — LLM may silently truncate."
+    },
+    "hallucination_guards": {
+      "score": 5,
+      "max": 5,
+      "note": "'Do not guess or invent an index' directly blocks artifact_index hallucination. Sticky-done ('Once done, a goal stays done forever') prevents goal-state drift."
+    },
+    "edge_case_handling": {
+      "score": 4,
+      "max": 5,
+      "note": "LLM returning fewer goals than prior is handled in Python (safety net appends missing goals). The known weak point — LLM-inferred done flags — is patched by agent.py setting goal.done = True immediately on ANSWER."
+    },
+    "ambiguity_risk": {
+      "level": "LOW",
+      "note": "Positional identity ('exact same order') removes goal-matching ambiguity. Done-inference from history is inherently fuzzy but is mitigated by the Python sticky-done guard."
+    },
+    "token_efficiency": {
+      "score": 4,
+      "max": 5,
+      "note": "~310 tokens. Concise for the constraint surface covered. 'fetch before extract, search before synthesize' helpfully pre-constrains ordering without extra tokens."
+    }
+  },
+  "overall": {
+    "pass": true,
+    "aggregate_score": 4.6,
+    "verdict": "Production-ready. Core design is sound — positional identity, sticky-done, and artifact-index guards prevent the main failure modes. The one structural weakness (done-flag inference) is now mitigated at the agent loop level."
+  },
+  "open_issues": [
+    {
+      "severity": "LOW",
+      "description": "No explicit instruction for queries that require >4 goals. LLM may silently bundle or truncate sub-tasks beyond the 1-4 range."
+    },
+    {
+      "severity": "LOW",
+      "description": "artifact_index is 1-based in the prompt but resolved in Python code. A convention mismatch would silently produce a null artifact attachment instead of an error."
+    }
+  ]
+}
+```
+
 ---
 
 ### Decision — `decision.py`
@@ -131,6 +223,93 @@ The loop terminates when Perception marks all goals as `done`, or when `MAX_ITER
 - Extraction, synthesis, and comparison goals must produce a substantive answer (≥ 3 sentences or a numbered list).
 
 **Why it matters:** Separating Decision from Action ensures the LLM never directly executes code. Decision emits intent (`ToolCall`); Action executes it through MCP. This also means Decision can be retried or replaced independently without touching the execution layer. The `auto_route` lets the gateway pick the cheapest provider that fits the request size — a small fetch decision goes to a fast TINY-tier model; an extraction decision with 50 KB of attached content goes to a large-context LARGE-tier provider.
+
+#### System prompt
+
+```
+You are DECISION, the action selector in an agentic loop.
+
+You receive one GOAL and supporting context. You must return EXACTLY ONE of:
+  1. answer   — a direct response you can produce from CONTEXT or ATTACHED ARTIFACTS
+  2. tool_call — when you need external data not already present in context
+
+STRICT RULES:
+- NEVER return both answer and tool_call in the same response.
+- Strings starting with "art:" are internal artifact handles. Do NOT pass them
+  as path or url arguments to any tool. The artifact bytes are in ATTACHED ARTIFACTS.
+- For extraction, list, comparison, recommendation, or synthesis goals: your answer
+  must be substantive — at least 3 sentences or a numbered/bulleted list of ≥ 3 items.
+- If HISTORY already contains the information needed for this goal, answer directly
+  without calling a tool again.
+- Pick the most specific tool for the task. Prefer fetch_url over web_search when
+  you already have a URL.
+```
+
+#### PoP validation
+
+```json
+{
+  "prompt_id": "decision_system_v1",
+  "role": "DECISION",
+  "evaluated_at": "2026-05-18",
+  "criteria": {
+    "role_definition": {
+      "score": 5,
+      "max": 5,
+      "note": "Role is clearly named ('DECISION, the action selector') and the binary output space (answer | tool_call) is stated immediately."
+    },
+    "task_specification": {
+      "score": 5,
+      "max": 5,
+      "note": "Two mutually exclusive outputs are defined with explicit conditions for choosing each. 'EXACTLY ONE' leaves no ambiguity."
+    },
+    "output_format": {
+      "score": 4,
+      "max": 5,
+      "note": "Tool-call format is enforced by gateway function-calling schema injection, not inlined in the prompt. The answer field has no explicit type constraint — relies on schema injection and the 'at least 3 sentences' quality rule."
+    },
+    "constraint_coverage": {
+      "score": 5,
+      "max": 5,
+      "note": "Six constraints cover mutual exclusion, artifact handle misuse, answer quality floor, history-first rule, tool selection preference, and output purity. Comprehensive for a 170-token prompt."
+    },
+    "hallucination_guards": {
+      "score": 5,
+      "max": 5,
+      "note": "'Strings starting with art: are internal artifact handles. Do NOT pass them as path or url arguments.' Names the exact failure mode. Reinforced by Action's runtime art: guard at execution time."
+    },
+    "edge_case_handling": {
+      "score": 4,
+      "max": 5,
+      "note": "History-first rule prevents redundant tool calls. No explicit guidance for partial information (e.g., one source found but goal asks for two) — the loop handles this by re-entering Decision on the next iteration."
+    },
+    "ambiguity_risk": {
+      "level": "LOW",
+      "note": "'NEVER return both' is unambiguous. 'At least 3 sentences or ≥ 3 items' gives a concrete, measurable quality bar. The only subjective element is 'most specific tool' — acceptable given the small tool set."
+    },
+    "token_efficiency": {
+      "score": 5,
+      "max": 5,
+      "note": "~170 tokens. Extremely concise for six enforced constraints. Every sentence carries load."
+    }
+  },
+  "overall": {
+    "pass": true,
+    "aggregate_score": 4.7,
+    "verdict": "Production-ready. Six STRICT RULES cover the most common Decision failure modes. Quality depends heavily on the context window built by Memory and Perception — the prompt itself is minimal by design, delegating context responsibility to the upstream roles."
+  },
+  "open_issues": [
+    {
+      "severity": "LOW",
+      "description": "No guidance for goals requiring aggregation from multiple tool calls. Decision emits one tool call per iteration; complex synthesis goals may require more iterations than estimated at planning time."
+    },
+    {
+      "severity": "LOW",
+      "description": "The '≥ 3 sentences' quality rule applies to all answer responses, including simple factual goals. This can produce unnecessarily verbose output for quick lookups."
+    }
+  ]
+}
+```
 
 ---
 
