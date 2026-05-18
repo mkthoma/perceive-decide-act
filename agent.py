@@ -189,6 +189,9 @@ async def run(query: str) -> str:
                             "text": out.answer,
                         }
                     )
+                    # Mark done immediately — don't rely on Perception to infer it
+                    # from history. Sticky-done in Perception will preserve this.
+                    goal.done = True
                     continue
 
                 # ── Action ─────────────────────────────────────────────── #
