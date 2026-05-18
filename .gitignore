@@ -1,0 +1,10 @@
+state/
+sandbox/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.uv/
+dist/
+*.egg-info/
+.env
