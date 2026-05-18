@@ -658,7 +658,53 @@ uv run python agent.py "My mom's birthday is 15 May 2026. Remember that and give
 ```
 
 ```
+--- iter 1 ---
+  [open] Store the date 15 May 2026 as the mother's birthday in memory.
+  [open] Calculate the date two weeks before 15 May 2026.
+  [open] Provide calendar reminders for 1 May 2026 and 15 May 2026.
+  [decision] TOOL_CALL: create_file({'content': "Mother's birthday: 15 May 2026", 'path': 'moms_birthday.txt'})
+  [action] -> ok — created moms_birthday.txt (30 chars)
 
+--- iter 2 ---
+  [open] Store the date 15 May 2026 as the mother's birthday in memory.
+  [open] Calculate the date two weeks before 15 May 2026.
+  [open] Provide calendar reminders for 1 May 2026 and 15 May 2026.
+  [decision] ANSWER: answer: The date 15 May 2026 has been successfully stored as your mother's birthday in the file `moms_birthday.txt`. As requested, I have noted that you would like a calendar reminder for two weeks pr...
+
+--- iter 3 ---
+  [done] Store the date 15 May 2026 as the mother's birthday in memory.
+  [open] Calculate the date two weeks before 15 May 2026.
+  [open] Provide calendar reminders for 1 May 2026 and 15 May 2026.
+  [decision] ANSWER: answer: To calculate the date two weeks before 15 May 2026, you subtract 14 days from that date.
+
+*   Starting date: 15 May 2026
+*   Calculation: 15 - 14 = 1
+*   Result: 1 May 2026
+
+Therefore, the dat...
+
+--- iter 4 ---
+  [done] Store the date 15 May 2026 as the mother's birthday in memory.
+  [done] Calculate the date two weeks before 15 May 2026.
+  [open] Provide calendar reminders for 1 May 2026 and 15 May 2026.
+  [decision] ANSWER: answer: Here are the calendar reminders for the dates requested:
+
+*   **1 May 2026:** This serves as your two-week reminder for your mother's birthday. Please ensure you have any gifts or arrangements...
+
+--- iter 5 ---
+  [done] Store the date 15 May 2026 as the mother's birthday in memory.
+  [done] Calculate the date two weeks before 15 May 2026.
+  [done] Provide calendar reminders for 1 May 2026 and 15 May 2026.
+
+[done] all goals satisfied
+
+============================================================
+FINAL ANSWER
+============================================================
+answer: Here are the calendar reminders for the dates requested:
+
+*   **1 May 2026:** This serves as your two-week reminder for your mother's birthday. Please ensure you have any gifts or arrangements prepared by this date.
+*   **15 May 2026:** This is your mother's birthday. Don't forget to reach out, send your greetings, or celebrate the occasion as planned.
 
 ```
 
@@ -668,7 +714,28 @@ uv run python agent.py "When is mom's birthday?"
 ```
 
 ```
+[agent] run_id=e1e9bfac
+[agent] query: When is mom's birthday?
 
+
+--- iter 1 ---
+  [open] When is mom's birthday?
+  [decision] TOOL_CALL: read_file({'path': 'moms_birthday.txt'})
+  [action] -> Mother's birthday: 15 May 2026
+
+--- iter 2 ---
+  [open] When is mom's birthday?
+  [decision] ANSWER: answer: Your mom's birthday is on 15 May 2026.
+
+--- iter 3 ---
+  [done] When is mom's birthday?
+
+[done] all goals satisfied
+
+============================================================
+FINAL ANSWER
+============================================================
+answer: Your mom's birthday is on 15 May 2026.
 
 ```
 
@@ -682,9 +749,32 @@ Memory hit at iter 1 means the agent answered without any tool call — the fact
 uv run python agent.py "Search for 'Python asyncio best practices', read the top 3 results, and give me a short numbered list of the advice they agree on."
 ```
 
-**What to expect (5–7 iterations):**
+**What to expect:**
 ```
+[agent] run_id=77883dba
+[agent] query: Search for 'Python asyncio best practices', read the top 3 results, and give me a short numbered list of the advice they agree on.
 
+
+--- iter 1 ---
+  [open] Search for 'Python asyncio best practices', read the top 3 results, and give me a short numbered list of the advice they agree on.
+  [force-attach] art:0d409e2d4ebe8db5 (7,038 bytes)
+  [decision] ANSWER: Based on the provided resources, here is a numbered list of the core best practices that are consistently recommended for working with Python's `asyncio`:
+
+1.  **Avoid Blocking the Event Loop:** Never...
+
+--- iter 2 ---
+  [done] Search for 'Python asyncio best practices', read the top 3 results, and give me a short numbered list of the advice they agree on.
+
+[done] all goals satisfied
+
+============================================================
+FINAL ANSWER
+============================================================
+Based on the provided resources, here is a numbered list of the core best practices that are consistently recommended for working with Python's `asyncio`:
+
+1.  **Avoid Blocking the Event Loop:** Never perform long-running, CPU-bound, or synchronous blocking operations (like standard `time.sleep()` or synchronous I/O) inside an `async` function. Doing so halts the entire event loop, causing lag and defeating the purpose of concurrency. Instead, use non-blocking alternatives like `await asyncio.sleep()` or offload blocking tasks to a separate thread using `loop.run_in_executor()`.
+2.  **Use `asyncio.run()` as the Entry Point:** Always utilize `asyncio.run()` to manage the lifecycle of your main coroutine. This ensures the event loop is created, managed, and closed correctly, which is the standard and safest way to execute the top-level entry point of an `asyncio` program.
+3.  **Utilize Proper Lifecycle Management:** Always use asynchronous context managers (such as `async with`) when dealing with resources like network clients (e.g., `aiohttp.ClientSession` or `httpx.AsyncClient`). This ensures that connections and sessions are opened and closed properly, preventing resource leaks and ensuring efficient handling of concurrent requests.
 
 ```
 
