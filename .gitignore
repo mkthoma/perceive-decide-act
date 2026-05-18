@@ -1,10 +1,65 @@
+# Runtime state
 state/
 sandbox/
+
+# Python bytecode
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.pycache
+
+# Virtual environments
 .venv/
+venv/
+env/
 .uv/
+
+# Build / packaging
 dist/
+build/
 *.egg-info/
+*.egg
+MANIFEST
+
+# Distribution / packaging
+.Python
+pip-wheel-metadata/
+*.whl
+
+# Secrets and local config
 .env
+.env.local
+.env.*.local
+
+# Test and coverage
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Type checkers
+.mypy_cache/
+.pyright/
+.ruff_cache/
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs
+*.log
+logs/
+
+# uv lock (keep uv.lock committed for reproducibility, but ignore local overrides)
+# uv.lock  # uncommenting this would ignore the lockfile — leave it tracked
