@@ -7,8 +7,8 @@ Roles per iteration (in order):
   Action     → execute(session, tc)  → (descriptor, artifact_id?)
 
 Usage:
-  uv run python agent6.py "Your query here"
-  uv run python agent6.py   # interactive prompt
+  uv run python agent.py "Your query here"
+  uv run python agent.py   # interactive prompt
 """
 from __future__ import annotations
 
@@ -108,8 +108,8 @@ async def run(query: str) -> str:
     history: list[dict] = []
     prior_goals: list[Goal] = []
 
-    print(f"\n[agent6] run_id={run_id}")
-    print(f"[agent6] query: {query}\n")
+    print(f"\n[agent] run_id={run_id}")
+    print(f"[agent] query: {query}\n")
 
     # Classify the query for durable memory (persists across runs)
     await memory.remember(query, source="user_query", run_id=run_id)
@@ -132,7 +132,7 @@ async def run(query: str) -> str:
                         query, hits, history, prior_goals, run_id
                     )
                 except Exception as exc:
-                    print(f"\n[agent6] ERROR in perception: {exc}")
+                    print(f"\n[agent] ERROR in perception: {exc}")
                     fatal_error = str(exc)
                     break
                 prior_goals = obs.goals
@@ -174,7 +174,7 @@ async def run(query: str) -> str:
                         goal, hits, attached, history, mcp_tools
                     )
                 except Exception as exc:
-                    print(f"\n[agent6] ERROR in decision: {exc}")
+                    print(f"\n[agent] ERROR in decision: {exc}")
                     fatal_error = str(exc)
                     break
 
@@ -219,7 +219,7 @@ async def run(query: str) -> str:
                 )
 
             else:
-                print(f"\n[agent6] reached MAX_ITERATIONS={MAX_ITERATIONS}")
+                print(f"\n[agent] reached MAX_ITERATIONS={MAX_ITERATIONS}")
 
     if fatal_error:
         sys.exit(1)

@@ -24,7 +24,7 @@ from mcp.server.fastmcp import FastMCP
 
 load_dotenv()
 
-mcp = FastMCP("agent6-tools")
+mcp = FastMCP("agent-tools")
 
 _SANDBOX = Path("sandbox")
 _SANDBOX.mkdir(parents=True, exist_ok=True)

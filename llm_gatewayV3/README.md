@@ -478,7 +478,7 @@ Same as V1/V2 — add adapter in `providers.py`, entry in `build_providers()`, `
 - **No router-router-of-routers.** The router pool is failed-over via a static `ROUTER_ORDER` ring. There is no meta-router deciding which router to use — that would be infinite recursion.
 - **No streaming on routed calls.** `auto_route` and `stream=true` aren't designed to work together yet (the router needs the full prompt before it can classify). For streaming, use explicit `provider=...`.
 - **No new providers vs V2.** Mistral AI and OVHcloud were evaluated and parked for V4. Worker pool stays at 7 providers; router pool is 4 of the existing providers used with different (router-grade) model defaults.
-- **No new tools / no agent loop.** Same as V2 — V3 is the substrate. The agent loop that uses `auto_route` is in Session 6's `agent6.py`, not here.
+- **No new tools / no agent loop.** Same as V2 — V3 is the substrate. The agent loop that uses `auto_route` is in Session 6's `agent.py`, not here.
 
 ---
 

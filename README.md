@@ -41,7 +41,7 @@ This downloads Chromium (~150 MB). Only needed once.
 ### 4. Run your first query
 
 ```powershell
-uv run python agent6.py "What time is it in Tokyo right now?"
+uv run python agent.py "What time is it in Tokyo right now?"
 ```
 
 The gateway runs **in-process** — no separate server needed. Provider adapters
@@ -53,7 +53,7 @@ failover happens in the same process.
 ## Architecture
 
 ```
-agent6 loop
+agent loop
   │
   ├─ Memory       Typed, persistent fact store. read() uses keyword overlap
   │               (no LLM). remember() classifies free-form text via one
@@ -77,17 +77,17 @@ agent6 loop
 | Property | Where enforced |
 |---|---|
 | Goals have stable identity (position, not LLM-generated IDs) | `perception.py` |
-| Artifact attachment decided by Perception, not Decision | `agent6.py` loop |
+| Artifact attachment decided by Perception, not Decision | `agent.py` loop |
 | Artifact handles (`art:…`) are never valid tool arguments | `action.py` guard |
 | `done: true` is sticky — never flipped back | `perception.py` |
-| Synthesis goals trigger force-attach safety net | `agent6.py` loop |
+| Synthesis goals trigger force-attach safety net | `agent.py` loop |
 | Memory persists across process restarts | `state/memory.json` |
 
 ## File layout
 
 ```
 perceive-decide-act/
-├── agent6.py           Main loop (Memory → Perception → Decision → Action)
+├── agent.py           Main loop (Memory → Perception → Decision → Action)
 ├── schemas.py          Pydantic v2 contracts for all role boundaries
 ├── memory.py           Typed fact store with keyword search and LLM classification
 ├── perception.py       Goal decomposition and done-flag tracking (Gemini)
@@ -136,7 +136,7 @@ Or open the dashboard: <http://localhost:8101>
 
 ### How routing works
 
-When `agent6` sends a call tagged `auto_route="decision"` (or `"perception"` / `"memory"`), the gateway:
+When `agent` sends a call tagged `auto_route="decision"` (or `"perception"` / `"memory"`), the gateway:
 
 1. Estimates the token count of the request
 2. Sends a bounded `{token_count, sample}` envelope to a router LLM (Cerebras → Groq → NVIDIA → GitHub, first available)
@@ -172,12 +172,12 @@ See [llm_gatewayV3/README.md](llm_gatewayV3/README.md) for the full breakdown of
 ### Query A — Shannon Wikipedia (artifact attach test)
 
 ```bash
-uv run python agent6.py "Fetch https://en.wikipedia.org/wiki/Claude_Shannon and tell me his birth date, death date, and three key contributions to information theory."
+uv run python agent.py "Fetch https://en.wikipedia.org/wiki/Claude_Shannon and tell me his birth date, death date, and three key contributions to information theory."
 ```
 
 **What to expect (3 iterations):**
 ```
-[agent6] run_id=<id>
+[agent] run_id=<id>
 
 ─── iter 1 ───
   [open] Fetch the Wikipedia page for Claude Shannon
@@ -205,7 +205,7 @@ This query tests that Perception detects the fetch goal is done, sets `attach_ar
 ### Query B — Tokyo activities (multi-goal + weather constraint)
 
 ```bash
-uv run python agent6.py "Find 3 family-friendly things to do in Tokyo this weekend. Check Saturday's weather forecast there and tell me which one is most appropriate."
+uv run python agent.py "Find 3 family-friendly things to do in Tokyo this weekend. Check Saturday's weather forecast there and tell me which one is most appropriate."
 ```
 
 **What to expect (≤ 6 iterations):**
@@ -232,7 +232,7 @@ uv run python agent6.py "Find 3 family-friendly things to do in Tokyo this weeke
 
 **Run 1** — store the fact:
 ```bash
-uv run python agent6.py "My mom's birthday is 15 May 2026. Remember that and give me a calendar reminder for two weeks before and on the day."
+uv run python agent.py "My mom's birthday is 15 May 2026. Remember that and give me a calendar reminder for two weeks before and on the day."
 ```
 
 ```
@@ -248,7 +248,7 @@ FINAL ANSWER: Reminders created. Mom's birthday on 15 May 2026 is recorded.
 
 **Run 2** — recall from memory (do not clear `state/` between runs):
 ```bash
-uv run python agent6.py "When is mom's birthday?"
+uv run python agent.py "When is mom's birthday?"
 ```
 
 ```
@@ -266,7 +266,7 @@ Memory hit at iter 1 means the agent answered without any tool call — the fact
 ### Query D — Asyncio research (multi-source synthesis)
 
 ```bash
-uv run python agent6.py "Search for 'Python asyncio best practices', read the top 3 results, and give me a short numbered list of the advice they agree on."
+uv run python agent.py "Search for 'Python asyncio best practices', read the top 3 results, and give me a short numbered list of the advice they agree on."
 ```
 
 **What to expect (5–7 iterations):**
@@ -291,7 +291,7 @@ uv run python agent6.py "Search for 'Python asyncio best practices', read the to
     ...
 ```
 
-The `[force-attach]` line means the synthesis safety net fired — Perception hadn't set an explicit `attach_artifact_id`, but `agent6.py` detected the synthesis keyword in the goal text and auto-attached the most recent artifact.
+The `[force-attach]` line means the synthesis safety net fired — Perception hadn't set an explicit `attach_artifact_id`, but `agent.py` detected the synthesis keyword in the goal text and auto-attached the most recent artifact.
 
 ---
 

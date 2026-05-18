@@ -541,4 +541,4 @@ async def help_page():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
+    uvicorn.run("main:app", host="127.0.0.1", port=PORT, reload=False)
