@@ -177,6 +177,17 @@ def _backoff_secs(err: Exception) -> float:
         return 20
     if status in (401, 403):
         return 600
+    # 404 usually means capability mismatch (e.g. tool_choice not supported by
+    # this OpenRouter route) — back off long enough to skip this round entirely.
+    if status == 404:
+        return 300
+    # Generic exceptions (connection refused, empty error, timeout) — short
+    # backoff so the provider is not spammed on every round.
+    if status is None and not getattr(err, "retryable", True):
+        return 30
+    # Non-retryable generic exception: small backoff to avoid tight loops
+    if not str(err).strip():
+        return 30
     return 0
 
 
@@ -246,9 +257,11 @@ async def chat(
     last_err: str | None = None
     initial_candidates = list(candidates)
 
-    # Up to 3 rounds: each round tries all remaining candidates once,
-    # then waits for the shortest cooldown (≤10s) before the next round.
-    for _round in range(3):
+    # Up to 8 rounds: each round tries all remaining candidates once,
+    # then waits for the shortest cooldown before the next round.
+    # 8 rounds covers multiple Gemini RPM backoff windows (~14s, 57s, 12s…)
+    # without giving up prematurely when only one provider is available.
+    for _round in range(8):
         for _ in range(len(candidates) + 1):
             name, atts = router.pick(est, candidates, required_caps=required_caps)
             all_attempts.extend(atts)
@@ -281,6 +294,12 @@ async def chat(
             except Exception as e:
                 last_err = str(e)
                 all_attempts.append({"provider": name, "reason": f"exception: {str(e)[:100]}"})
+                # Generic exceptions (connect error, empty error) get a short
+                # backoff so the provider is not retried on every round.
+                _generic_secs = _backoff_secs(e)
+                if _generic_secs == 0:
+                    _generic_secs = 30  # minimum 30s for any unrecognised failure
+                router.state[name].mark_unavailable(_generic_secs, str(e)[:80] or "generic exception")
                 candidates = [c for c in candidates if c != name]
                 continue
 
@@ -352,7 +371,7 @@ async def chat(
             state_c = router.state[cname]
             if state_c.unavailable_until > now:
                 hard_wait = state_c.unavailable_until - now
-                if hard_wait <= 90 and (min_hard is None or hard_wait < min_hard):
+                if hard_wait <= 150 and (min_hard is None or hard_wait < min_hard):
                     min_hard = hard_wait
                 continue
             wait_c = LIMITS.get(cname, {}).get("cooldown", 0) - (now - state_c.last_call)

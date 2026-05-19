@@ -342,6 +342,18 @@ class OpenRouterProvider(OpenAICompatProvider):
         h["X-Title"] = "LLM Gateway V2"
         return h
 
+    async def chat(self, messages, *, max_tokens=2048, temperature=0.7, model=None,
+                   tools=None, tool_choice=None, reasoning=None, response_format=None,
+                   system_blocks=None, cache_system=False):
+        # OpenRouter rejects tool_choice="auto" on many free routes (404).
+        # Pass tools without tool_choice so the model still sees the tool defs.
+        return await super().chat(
+            messages, max_tokens=max_tokens, temperature=temperature, model=model,
+            tools=tools, tool_choice=None, reasoning=reasoning,
+            response_format=response_format, system_blocks=system_blocks,
+            cache_system=cache_system,
+        )
+
 
 class GitHubProvider(OpenAICompatProvider):
     name = "github"
