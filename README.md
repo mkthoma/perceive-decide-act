@@ -15,14 +15,22 @@ Lightweight agentic framework built on a four-role cognitive loop — **Memory �
 cp .env.example .env
 ```
 
-Open `.env` and fill in at least one worker provider key. Gemini is the recommended starting point — the free tier (15 RPM / 1,000 RPD) handles all four example queries with room to spare.
+Open `.env` and fill in at least one worker provider key and at least one search provider key.
 
 ```bash
-# Minimum viable .env
+# Minimum viable .env — one LLM worker + one search provider
 GEMINI_API_KEY=your_gemini_api_key_here
+
+# Search chain: Tavily → Exa → Firecrawl → DuckDuckGo (free, no key)
+# Add at least one for reliable search results.
+TAVILY_API_KEY=your_tavily_api_key_here   # recommended: 1,000 free/mo
+EXA_API_KEY=your_exa_api_key_here         # 1,000 free/mo
+FIRECRAWL_API_KEY=your_firecrawl_api_key_here  # 500 credits/mo
 ```
 
 The `.env` file lives at the **repo root** — one level above `llm_gatewayV3/`. The gateway reads `../.env` relative to its own directory, so a single file covers both.
+
+> **Search reliability:** Without any search key, `web_search` falls through to DuckDuckGo (free, no key required) which works but is rate-limited and unreliable. Adding a Tavily key is the quickest fix — free tier at <https://app.tavily.com/>.
 
 ### 3. Install agent dependencies
 
@@ -42,6 +50,13 @@ This downloads Chromium (~150 MB). Only needed once.
 
 ```powershell
 uv run python agent.py "What time is it in Tokyo right now?"
+```
+
+Or run the full canonical test suite:
+
+```powershell
+uv run python test_all.py          # all 5 queries
+uv run python test_all.py 1 3 4    # run queries A, C1, C2 only (1-based)
 ```
 
 The gateway runs **in-process** — no separate server needed. Provider adapters
@@ -321,9 +336,11 @@ STRICT RULES:
 
 1. **Guard check**: Before any dispatch, Action inspects the tool arguments for `art:…` handles in path/URL fields. If found, it returns an error descriptor immediately — this prevents Decision from accidentally passing a stale artifact handle to a tool that expects a real URL or file path.
 
-2. **MCP dispatch**: Calls `session.call_tool(name, arguments)` over the stdio MCP transport. The MCP server (`mcp_server.py`) executes the tool and returns content blocks.
+2. **MCP dispatch**: Calls `session.call_tool(name, arguments)` wrapped in `asyncio.wait_for` with a **60-second timeout**. If the tool does not respond in time (e.g. `crawl4ai` rendering a large page), Action returns a `[tool_timeout]` error descriptor. The agent loop treats this as an error, and Decision falls back to `web_search` for the information instead.
 
-3. **Artifact threshold**: If the tool response exceeds `ARTIFACT_THRESHOLD_BYTES` (4 KB), the bytes are written to the content-addressable artifact store (`state/artifacts/`). The returned descriptor includes the artifact handle (`art:<sha256[:16]>`) and a 200-character preview. If the response is small enough, it is returned as raw text with no artifact created.
+3. **JSON post-processing**: The MCP server returns typed Python objects (`list[dict]`, `dict`) which FastMCP serialises as JSON strings. Action unwraps these into clean human-readable text before passing them to Decision — search results become `Title / URL / Snippet` blocks, file tool responses become plain file content, etc.
+
+4. **Artifact threshold**: If the tool response exceeds `ARTIFACT_THRESHOLD_BYTES` (4 KB), the bytes are written to the content-addressable artifact store (`state/artifacts/`). The returned descriptor includes the artifact handle (`art:<sha256[:16]>`) and a 200-character preview. If the response is small enough, it is returned as raw text with no artifact created.
 
 **Why it matters:** The artifact threshold is what keeps Decision's context from bloating. A 50 KB Wikipedia page is stored once as `art:4c163…` and referred to by handle throughout the remaining iterations. Only when Perception explicitly attaches it does Decision see the bytes — and only the bytes it actually needs, not every tool result from every prior iteration. The `art:` guard closes the loop: Decision is told not to pass handles to tools, and Action enforces that rule at execution time.
 
@@ -415,10 +432,11 @@ perceive-decide-act/
 ├── memory.py           Typed fact store — keyword search, LLM classification
 ├── perception.py       Goal decomposition and done-flag tracking (Gemini)
 ├── decision.py         Action selection — answer or single tool call
-├── action.py           MCP dispatch with artifact threshold and art: guard
+├── action.py           MCP dispatch with 60s timeout, JSON post-processing, artifact threshold
 ├── artifact_store.py   Content-addressable store (state/artifacts/)
 ├── llm_gateway.py      In-process LLM gateway — routing, failover, rate limits
-├── mcp_server.py       9 MCP tools over stdio transport
+├── mcp_server.py       9 MCP tools — Tavily → Exa → Firecrawl → DDG search chain
+├── test_all.py         Colour-coded runner for the 5 canonical test queries
 ├── pyproject.toml      uv project config
 ├── .env.example        Environment variable template
 └── llm_gatewayV3/      Gateway source (see llm_gatewayV3/README.md)
@@ -782,6 +800,28 @@ The `[force-attach]` line means the synthesis safety net fired — Perception ha
 
 ---
 
+## Running the canonical test suite
+
+`test_all.py` runs the five canonical queries with colour-coded output (yellow question, green answer, red error) and a summary table at the end.
+
+```powershell
+uv run python test_all.py          # all 5 queries
+uv run python test_all.py 1        # Query A only
+uv run python test_all.py 3 4      # C1 and C2 only (1-based index)
+```
+
+| # | Label | Query |
+|---|---|---|
+| 1 | Query A | Fetch Claude Shannon Wikipedia — birth/death dates + 3 contributions |
+| 2 | Query B | 3 family-friendly Tokyo activities + live weather + recommendation |
+| 3 | Query C1 | Remember mom's birthday + calendar reminders |
+| 4 | Query C2 | Recall mom's birthday (run after C1) |
+| 5 | Query D | Search asyncio best practices, read top 3 results, list common advice |
+
+Each query has a **180-second timeout**. A timed-out query is marked as failed in the summary table but does not stop the remaining queries from running.
+
+---
+
 ## Resetting state
 
 ```bash
@@ -798,17 +838,30 @@ rm state/memory.json
 
 | Tool | Description |
 |---|---|
-| `web_search` | Tavily (with `TAVILY_API_KEY`) or DuckDuckGo fallback — titles, URLs, snippets |
-| `fetch_url` | httpx (static pages) with crawl4ai fallback for JS-rendered content |
-| `get_time` | Current UTC time in ISO 8601 |
+| `web_search` | Four-provider chain: **Tavily → Exa → Firecrawl → DuckDuckGo**. Returns titles, URLs, snippets. Hard-capped at 5 results. Usage logged to `usage.json` with monthly rollover. |
+| `fetch_url` | crawl4ai headless Chromium — clean markdown from any URL. Subject to 60 s Action-layer timeout; Decision falls back to `web_search` on `[tool_timeout]`. |
+| `get_time` | Current time in any IANA timezone (e.g. `"Asia/Tokyo"`) |
 | `currency_convert` | Live rates via Frankfurter API |
-| `read_file` | Read a file from `sandbox/` |
+| `read_file` | Read a UTF-8 file from `sandbox/` |
 | `list_dir` | List contents of a `sandbox/` directory |
-| `create_file` | Create a new file in `sandbox/` |
-| `update_file` | Overwrite a `sandbox/` file |
-| `edit_file` | Replace a text segment in a `sandbox/` file |
+| `create_file` | Create a new file in `sandbox/` (errors if already exists) |
+| `update_file` | Overwrite an existing `sandbox/` file |
+| `edit_file` | Find-and-replace inside a `sandbox/` file |
 
 All file tools are sandboxed to `sandbox/` — path traversal outside that directory is blocked.
+
+### Search provider priority
+
+`web_search` tries each provider in order and returns as soon as one succeeds:
+
+| Priority | Provider | Key env var | Free tier |
+|---|---|---|---|
+| 1 | Tavily | `TAVILY_API_KEY` | 1,000 searches/mo |
+| 2 | Exa | `EXA_API_KEY` | 1,000 searches/mo |
+| 3 | Firecrawl | `FIRECRAWL_API_KEY` | 500 credits/mo |
+| 4 | DuckDuckGo | *(none)* | Free, rate-limited |
+
+Provider errors and usage counts are tracked in `usage.json` (monthly rollover).
 
 ---
 
@@ -819,3 +872,13 @@ All file tools are sandboxed to `sandbox/` — path traversal outside that direc
 - `fallback_used: true` in `router_decision` — all router-pool workers were rate-limited; the gateway fell back to the deterministic token-count rule. The worker call still succeeds.
 - Gemini 3.x loops at `temperature=0` — Perception is pinned to `temperature=1.0` to prevent this.
 - Cerebras `queue_exceeded` errors are routine on the free tier and handled by router failover to Groq.
+
+---
+
+## Reliability notes
+
+### fetch_url timeouts
+`fetch_url` uses crawl4ai (headless Chromium) which can be slow on heavy external pages. Action enforces a **60-second hard timeout** — if exceeded, the agent receives `[tool_timeout]` and Decision falls back to `web_search`. To avoid this for research queries, add a Tavily or Exa API key so `web_search` returns rich snippets that Decision can synthesise without needing to fetch each URL.
+
+### Search reliability
+Without any key, DuckDuckGo is the only search provider — it is free but rate-limited and sometimes returns empty results. The fallback chain (Tavily → Exa → Firecrawl → DuckDuckGo) means the agent degrades gracefully as each tier is exhausted, but for consistent results add at least one paid key.
