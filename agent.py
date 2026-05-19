@@ -349,10 +349,15 @@ async def run(query: str) -> str:
 
     answer = _final_answer_from(history, prior_goals)
 
-    # If no answer was recorded at all (e.g. all goals auto-completed via tool
-    # calls but no ANSWER was produced), make one final Decision call to
-    # synthesise the answer from whatever is in memory + history.
-    if answer == "Task completed with no answer recorded." and not fatal_error:
+    # If no real answer was recorded (e.g. all goals auto-completed via tool
+    # calls, or Perception prematurely marked extraction goals done before an
+    # answer was produced), make one final Decision call to synthesise the
+    # answer from whatever is in memory + history.
+    _no_real_answer = (
+        answer == "Task completed with no answer recorded."
+        or answer.startswith("Task completed. Last action:")
+    )
+    if _no_real_answer and not fatal_error:
         try:
             hits = memory.read(query, history)
             synth_goal = Goal(text=query)
