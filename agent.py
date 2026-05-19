@@ -268,6 +268,21 @@ async def run(query: str) -> str:
                                     )
                                     break
 
+                # Goal-artifact auto-attach: if this specific goal produced an
+                # artifact in a prior iteration (e.g. fetch → extract pattern),
+                # attach it now so Decision has the bytes without re-fetching.
+                # Covers the case where Perception only ran on iter 1 and never
+                # had a chance to set attach_artifact_id on later iterations.
+                if not attached:
+                    for h in reversed(history):
+                        if h.get("goal_id") == goal.id and h.get("artifact_id"):
+                            art_id = h["artifact_id"]
+                            if artifacts.exists(art_id):
+                                raw = artifacts.get_bytes(art_id)
+                                attached.append((art_id, raw))
+                                print(f"  [goal-attach] {art_id} ({len(raw):,} bytes)")
+                                break
+
                 # ── Decision ───────────────────────────────────────────── #
                 try:
                     out = await decision.next_step(

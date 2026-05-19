@@ -140,6 +140,28 @@ def _strip_titles(schema: dict) -> dict:
     return cleaned
 
 
+def _is_garbage_text(text: str) -> bool:
+    """Return True when text looks like garbled/incoherent model output.
+
+    Catches the patterns seen from degraded Ollama / free-tier providers:
+    - High pipe-character density (layout fragments)
+    - CJK characters mixed with pipe separators
+    - CJK + Greek simultaneously (multi-script hallucination)
+    """
+    if not text or len(text) < 20:
+        return False
+    # High pipe density: more than 6% of all chars are '|'
+    if text.count("|") / len(text) > 0.06:
+        return True
+    has_cjk = any('一' <= c <= '鿿' or '぀' <= c <= 'ヿ' for c in text)
+    if has_cjk and text.count("|") > 2:
+        return True
+    has_greek = any('Ͱ' <= c <= 'Ͽ' for c in text)
+    if has_cjk and has_greek:
+        return True
+    return False
+
+
 def _backoff_secs(err: Exception) -> float:
     msg = str(err).lower()
     status = getattr(err, "status", None)
@@ -265,6 +287,19 @@ async def chat(
             tokens = (result.get("input_tokens") or 0) + (result.get("output_tokens") or 0)
             router.state[name].tokens_today += tokens
             router.state[name].tokens_minute.append((time.time(), tokens))
+
+            # Quality gate: reject garbled / incoherent text responses.
+            # Only fires for plain text (no tool calls, no structured output).
+            # Marks the offending provider unavailable for 90 s and retries
+            # the next candidate so callers never see garbage output.
+            _raw_text = result.get("text", "")
+            if _raw_text and not result.get("tool_calls") and not response_format:
+                if _is_garbage_text(_raw_text):
+                    router.state[name].mark_unavailable(90, "garbage_output_detected")
+                    candidates = [c for c in candidates if c != name]
+                    all_attempts.append({"provider": name, "reason": "garbage_output_detected"})
+                    last_err = f"garbage output from {name}"
+                    continue  # try next provider in inner loop
 
             # Normalize tool_calls — ensure arguments is always a dict
             normalized: list[dict] = []
