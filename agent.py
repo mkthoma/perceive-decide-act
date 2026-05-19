@@ -184,6 +184,13 @@ async def run(query: str) -> str:
             mcp_tools = _mcp_tools_for_decision(tools_result.tools)
 
             for it in range(1, MAX_ITERATIONS + 1):
+                # Fast-path exit: if all goals are already marked done from
+                # the previous iteration, skip the Perception LLM call and
+                # break immediately — saves one gateway round-trip per query.
+                if it > 1 and prior_goals and all(g.done for g in prior_goals):
+                    print("\n[done] all goals satisfied")
+                    break
+
                 # ── Memory ─────────────────────────────────────────────── #
                 hits = memory.read(query, history)
 
