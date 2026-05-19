@@ -213,7 +213,7 @@ class OpenAICompatProvider(BaseProvider):
         self._apply_response_format(body, response_format)
         reasoning_applied = self._apply_reasoning(body, reasoning, m)
 
-        async with httpx.AsyncClient(timeout=30) as c:
+        async with httpx.AsyncClient(timeout=45) as c:
             r = await c.post(f"{self.base_url}/chat/completions", headers=self._headers(), json=body)
             if r.status_code != 200:
                 # Some providers reject reasoning_effort or strict json_schema — retry without them.
@@ -286,7 +286,7 @@ class OpenAICompatProvider(BaseProvider):
                 body["tool_choice"] = tool_choice if isinstance(tool_choice, (str, dict)) else "auto"
         self._apply_response_format(body, response_format)
         self._apply_reasoning(body, reasoning, m)
-        async with httpx.AsyncClient(timeout=30) as c:
+        async with httpx.AsyncClient(timeout=45) as c:
             async with c.stream("POST", f"{self.base_url}/chat/completions",
                                 headers=self._headers(), json=body) as r:
                 if r.status_code != 200:
