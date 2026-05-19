@@ -78,18 +78,42 @@ def _is_synthesis_goal(text: str) -> bool:
     return bool(words & _SYNTHESIS_KW)
 
 
-def _final_answer_from(history: list[dict]) -> str:
-    # Use the last answer — it's from the most recently completed goal and is
-    # the most coherent. Joining all answers risks including intermediate or
-    # garbage responses from earlier iterations.
-    for h in reversed(history):
+def _final_answer_from(history: list[dict], goals: list[Goal]) -> str:
+    """Build the final answer from history.
+
+    When multiple goals each produced an answer, join them in goal order so
+    every sub-question is represented in the output (e.g. birth date AND
+    contributions, not just whichever was answered last).
+    """
+    # Collect the last answer for each goal_id (later entries overwrite earlier)
+    answer_by_goal: dict[str, str] = {}
+    for h in history:
         if h.get("kind") == "answer" and h.get("text"):
-            return h["text"]
-    # Fallback: last action descriptor
-    for h in reversed(history):
-        if h.get("kind") == "action":
-            return f"Task completed. Last action: {h.get('result_descriptor', '')}"
-    return "Task completed with no answer recorded."
+            gid = h.get("goal_id", "")
+            answer_by_goal[gid] = h["text"]
+
+    if not answer_by_goal:
+        for h in reversed(history):
+            if h.get("kind") == "action":
+                return f"Task completed. Last action: {h.get('result_descriptor', '')}"
+        return "Task completed with no answer recorded."
+
+    if len(answer_by_goal) == 1:
+        return next(iter(answer_by_goal.values()))
+
+    # Multiple goals — return answers in goal order, one paragraph per goal
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for g in goals:
+        if g.id in answer_by_goal:
+            ordered.append(answer_by_goal[g.id])
+            seen.add(g.id)
+    # Append any orphaned answers not matched to a current goal
+    for gid, ans in answer_by_goal.items():
+        if gid not in seen:
+            ordered.append(ans)
+
+    return "\n\n---\n\n".join(ordered)
 
 
 def _print_goals(goals: list[Goal]) -> None:
@@ -227,7 +251,7 @@ async def run(query: str) -> str:
     if fatal_error:
         sys.exit(1)
 
-    return _final_answer_from(history)
+    return _final_answer_from(history, prior_goals)
 
 
 # --------------------------------------------------------------------------- #
