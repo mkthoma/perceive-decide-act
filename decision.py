@@ -57,6 +57,9 @@ STRICT RULES:
 - When a goal says "read the top N results" or "read each result", call fetch_url
   on each URL from the prior web_search result before synthesising. Snippets alone
   are NOT sufficient — fetch the actual page content first.
+- If HISTORY contains a [tool_timeout] result for a fetch_url call, that URL is
+  too slow to render. DO NOT retry the same URL. Instead fall back to web_search
+  to find the same information from a different source.
 - When the user asks to "remember" something, use create_file to save the fact:
     create_file(path="memory/{key}.txt", content="...the fact...")
   Create the memory/ directory first with create_file if needed."""

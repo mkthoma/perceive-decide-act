@@ -9,7 +9,12 @@ so Decision sees plain strings, not raw JSON wrappers.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+
+# Hard ceiling on any single MCP tool call so a slow fetch_url / crawl4ai
+# render can't hang the agent loop indefinitely.
+_TOOL_TIMEOUT_SECS = 60
 
 from mcp import ClientSession
 
@@ -132,7 +137,17 @@ async def execute(
             None,
         )
 
-    result = await session.call_tool(tool_call.name, arguments=tool_call.arguments)
+    try:
+        result = await asyncio.wait_for(
+            session.call_tool(tool_call.name, arguments=tool_call.arguments),
+            timeout=_TOOL_TIMEOUT_SECS,
+        )
+    except asyncio.TimeoutError:
+        return (
+            f"[tool_timeout] {tool_call.name} did not respond within "
+            f"{_TOOL_TIMEOUT_SECS}s — try a different URL or approach.",
+            None,
+        )
 
     # Collapse MCP content blocks into a single text string
     text_parts: list[str] = []

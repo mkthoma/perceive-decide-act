@@ -149,10 +149,13 @@ def _summary(results: list[tuple[str, bool, float]]) -> None:
 
 # ── Runner ───────────────────────────────────────────────────────────────────
 
+_QUERY_TIMEOUT = 180  # seconds per query before we give up
+
+
 async def _run_one(query: str) -> tuple[str, float]:
     from agent import run as agent_run
     t0 = time.perf_counter()
-    answer = await agent_run(query)
+    answer = await asyncio.wait_for(agent_run(query), timeout=_QUERY_TIMEOUT)
     return answer, time.perf_counter() - t0
 
 
@@ -174,6 +177,10 @@ async def main(indices: list[int] | None = None) -> None:
             answer, elapsed = await _run_one(query)
             _print_answer(answer, elapsed)
             results.append((label, True, elapsed))
+        except asyncio.TimeoutError:
+            elapsed = _QUERY_TIMEOUT
+            _print_error(TimeoutError(f"Query timed out after {_QUERY_TIMEOUT}s"), elapsed)
+            results.append((label, False, elapsed))
         except Exception as exc:
             _print_error(exc, 0.0)
             results.append((label, False, 0.0))
