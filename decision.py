@@ -46,8 +46,12 @@ STRICT RULES:
 - If HISTORY shows 3 or more consecutive web_search results with "No results found"
   for the same goal, STOP searching. Answer from your own knowledge or note the
   information is unavailable — never search the same topic a fourth time.
-- If HISTORY contains "[SEARCH_EXHAUSTED:" for this goal, do NOT call any tool.
-  Answer immediately from your knowledge, even if incomplete.
+- If HISTORY contains "[SEARCH_EXHAUSTED:" for this goal, do NOT call web_search again.
+  Instead, pivot to fetch_url on official documentation or well-known resource pages:
+    • Python stdlib: fetch_url(url="https://docs.python.org/3/library/{module}.html")
+    • Real Python:   fetch_url(url="https://realpython.com/async-io-python/")
+    • GitHub docs, MDN, official project docs — whatever fits the topic.
+  Only fall back to answering from your own knowledge if fetch_url also fails.
 - Pick the most specific tool for the task. Prefer fetch_url over web_search when
   you already have a URL.
 - When a goal says "read the top N results" or "read each result", call fetch_url

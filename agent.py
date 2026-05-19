@@ -305,7 +305,7 @@ async def run(query: str) -> str:
                                 "goal_id": goal.id,
                                 "tool": tc.name,
                                 "arguments": tc.arguments,
-                                "result_descriptor": result_text[:300] + " [SEARCH_EXHAUSTED: answer from knowledge]",
+                                "result_descriptor": result_text[:300] + " [SEARCH_EXHAUSTED: web_search returned no results after 3 attempts. Do NOT call web_search again. Instead call fetch_url on official documentation or well-known resource URLs for this topic.]",
                                 "artifact_id": None,
                             }
                         )
