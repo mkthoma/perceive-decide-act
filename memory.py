@@ -201,7 +201,7 @@ class Memory:
                 system=_CLASSIFY_SYSTEM,
                 auto_route="memory",
                 response_model=_Classification,
-                temperature=0.3,
+                temperature=1.0,
             )
             cls = gw.parse_model(resp, _Classification)
         except Exception:
