@@ -12,9 +12,10 @@ from __future__ import annotations
 import asyncio
 import json
 
-# Hard ceiling on any single MCP tool call so a slow fetch_url / crawl4ai
-# render can't hang the agent loop indefinitely.
-_TOOL_TIMEOUT_SECS = 60
+# Hard ceiling on any single MCP tool call.  fetch_url now tries plain HTTP
+# first (~3 s); crawl4ai only fires as a fallback, so 30 s is enough for
+# either path and frees budget for subsequent Perception/Decision LLM calls.
+_TOOL_TIMEOUT_SECS = 30
 
 from mcp import ClientSession
 
