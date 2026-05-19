@@ -32,6 +32,8 @@ STRICT RULES:
   Answer directly from ATTACHED ARTIFACTS — do NOT call any tool.
 - For real-time data (current time, live exchange rates, today's weather),
   ALWAYS call the appropriate tool — never answer from memory or assumptions.
+- For WEATHER questions, ALWAYS call get_weather(city="...") — NEVER use web_search
+  for weather. get_weather is free, reliable, and always returns real forecast data.
 - For extraction, list, comparison, recommendation, or synthesis goals: your answer
   must be substantive — at least 3 sentences or a numbered/bulleted list of ≥ 3 items.
 - If HISTORY already contains a tool result for this goal, answer from that result
@@ -42,7 +44,12 @@ STRICT RULES:
 - If HISTORY contains "[SEARCH_EXHAUSTED:" for this goal, do NOT call any tool.
   Answer immediately from your knowledge, even if incomplete.
 - Pick the most specific tool for the task. Prefer fetch_url over web_search when
-  you already have a URL."""
+  you already have a URL.
+- When a goal says "read the top N results" or "read each result", call fetch_url
+  on each URL from the prior web_search result before synthesising. Snippets alone
+  are NOT sufficient — you must fetch the actual page content first.
+- When the user says "remember" something, call save_memory(text="...") with the
+  exact fact to store. Always do this before answering."""
 
 
 def _format_hits(hits: list[MemoryItem]) -> str:
