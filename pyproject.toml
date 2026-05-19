@@ -12,6 +12,7 @@ dependencies = [
     "duckduckgo-search>=6.0",
     "tavily-python>=0.3",
     "crawl4ai>=0.4",
+    "tzdata>=2024.1",  # IANA timezone database for zoneinfo on Windows
 ]
 
 [build-system]

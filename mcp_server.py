@@ -203,7 +203,11 @@ def get_time(tz: str = "UTC") -> str:
     try:
         zone = ZoneInfo(tz)
     except (ZoneInfoNotFoundError, KeyError):
-        zone = ZoneInfo("UTC")
+        try:
+            zone = ZoneInfo("UTC")
+        except Exception:
+            # Last resort: use stdlib UTC (no tzdata needed)
+            zone = timezone.utc
     return datetime.now(zone).isoformat()
 
 
