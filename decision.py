@@ -53,7 +53,11 @@ STRICT RULES:
   this goal. Switch to web_search immediately and answer from those results.
 - When the user asks to "remember" something, use create_file to save the fact:
     create_file(path="memory/{key}.txt", content="...the fact...")
-  Create the memory/ directory first with create_file if needed."""
+  Parent directories are created automatically — do NOT call create_file just to
+  make a directory; go straight to creating the file.
+- For "calendar reminder" or "set a reminder" goals: respond with a formatted
+  text reminder (date, event, notes). There is NO calendar API — do NOT call
+  any tool for this goal; answer directly."""
 
 
 def _format_hits(hits: list[MemoryItem]) -> str:

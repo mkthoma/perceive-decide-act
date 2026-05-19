@@ -311,12 +311,11 @@ def list_dir(path: str = ".") -> list[dict]:
 
 @mcp.tool()
 def create_file(path: str, content: str) -> dict:
-    """Create a new file in the sandbox; errors if it exists. Example: create_file("hello.txt", "hi")."""
+    """Create a new file in the sandbox; auto-creates parent directories. Example: create_file("memory/note.txt", "hi")."""
     p = _safe(path)
     if p.exists():
         raise ValueError(f"File '{path}' already exists")
-    if not p.parent.exists():
-        raise ValueError(f"Parent directory of '{path}' does not exist")
+    p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
     return {"ok": True, "path": path, "size_bytes": p.stat().st_size}
 
