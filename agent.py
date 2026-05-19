@@ -58,6 +58,11 @@ _ACQUISITION_VERBS = frozenset(
     "fetch download retrieve get load search look".split()
 )
 
+# Only these tools can trigger acquisition-goal auto-done.
+# Utility tools like get_time, currency_convert should NOT mark a goal done
+# just because they returned a value (e.g. get_time for "search weather" goal).
+_AUTO_DONE_TOOLS = frozenset({"web_search", "fetch_url", "read_file", "list_files"})
+
 
 # --------------------------------------------------------------------------- #
 # Helpers                                                                       #
@@ -262,9 +267,14 @@ async def run(query: str) -> str:
                 # "Fetch the Wikipedia page" is done once fetch_url returns data;
                 # no LLM answer is needed. This prevents Decision from looping
                 # trying to re-read an artifact handle it can't use as a path.
+                # Only fire for data-retrieval tools — utility tools like get_time
+                # or currency_convert should not auto-complete a "search" goal
+                # just because they returned a value.
                 is_error = result_text.startswith("[") and "error" in result_text[:80].lower()
                 is_empty = "no results found" in result_text[:80].lower() or result_text.strip() == "(empty directory)"
-                if not is_error and not is_empty and _is_acquisition_goal(goal.text):
+                if (not is_error and not is_empty
+                        and _is_acquisition_goal(goal.text)
+                        and tc.name in _AUTO_DONE_TOOLS):
                     goal.done = True
                     print(f"  [auto-done] acquisition goal satisfied by tool call")
 
