@@ -11,7 +11,7 @@ import re
 import llm_gateway as gw
 from schemas import DecisionOutput, Goal, MemoryItem, ToolCall
 
-_MAX_ARTIFACT_CHARS = 80_000  # ~20k tokens; truncate larger artifacts
+_MAX_ARTIFACT_CHARS = 15_000  # ~3750 tokens; keeps intro/infobox of any page
 
 # Matches vLLM / Groq-style text function call markup that some models emit
 # instead of native tool_calls:  <function(name){...}</function>
@@ -55,6 +55,11 @@ STRICT RULES:
   information is unavailable — never search the same topic a fourth time.
 - If HISTORY contains "[SEARCH_EXHAUSTED:" for this goal, answer from your own
   knowledge — do NOT call web_search or fetch_url again.
+- For well-known, stable facts in your training data (biographical dates, historical
+  events, scientific concepts, mathematical definitions), answer directly without
+  calling any tool. Only call fetch_url when the content is NOT in your training
+  data or must be live/real-time. "Fetch https://..." in a goal means "look up and
+  tell me" — prefer training knowledge over a slow URL fetch for known facts.
 - Prefer web_search over fetch_url by default. Only call fetch_url when you need
   the FULL rendered content of a specific page AND web_search snippets are not enough.
 - If HISTORY contains ANY [tool_timeout] result, do NOT call fetch_url again for
