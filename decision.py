@@ -26,6 +26,11 @@ You receive one GOAL and supporting context. You must return EXACTLY ONE of:
 
 STRICT RULES:
 - NEVER return both answer and tool_call in the same response.
+- Before choosing a tool_call, verify the action maps to an available tool.
+  If a goal asks you to DO something for which no tool exists (set a calendar
+  reminder, send an email, post to social media, create a document, book a
+  flight, etc.), answer directly with a clear text description of what should
+  be done — do NOT attempt to call a non-existent tool or loop trying.
 - Strings starting with "art:" are internal artifact handles. Do NOT pass them
   as path or url arguments to any tool. The artifact bytes are in ATTACHED ARTIFACTS.
 - If HISTORY contains a [STOP] line, the previous tool call was illegal.
@@ -54,10 +59,7 @@ STRICT RULES:
 - When the user asks to "remember" something, use create_file to save the fact:
     create_file(path="memory/{key}.txt", content="...the fact...")
   Parent directories are created automatically — do NOT call create_file just to
-  make a directory; go straight to creating the file.
-- For "calendar reminder" or "set a reminder" goals: respond with a formatted
-  text reminder (date, event, notes). There is NO calendar API — do NOT call
-  any tool for this goal; answer directly."""
+  make a directory; go straight to creating the file."""
 
 
 def _format_hits(hits: list[MemoryItem]) -> str:
