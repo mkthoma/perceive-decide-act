@@ -9,7 +9,6 @@ dependencies = [
     "mcp>=1.0",
     "anyio>=4.0",
     "python-dotenv>=1.0",
-    "duckduckgo-search>=6.0",
     "ddgs>=6.0",
     "tavily-python>=0.3",
     "crawl4ai>=0.4",

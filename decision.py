@@ -32,8 +32,13 @@ STRICT RULES:
   Answer directly from ATTACHED ARTIFACTS — do NOT call any tool.
 - For real-time data (current time, live exchange rates, today's weather),
   ALWAYS call the appropriate tool — never answer from memory or assumptions.
-- For WEATHER questions, ALWAYS call get_weather(city="...") — NEVER use web_search
-  for weather. get_weather is free, reliable, and always returns real forecast data.
+- For WEATHER data, call fetch_url with the wttr.in JSON API — it is free,
+  requires no key, and always returns a real forecast:
+    fetch_url(url="https://wttr.in/{City}?format=j1")
+  e.g. fetch_url(url="https://wttr.in/Tokyo?format=j1")
+  Only fall back to web_search for weather if the above fails.
+- get_time uses a 'timezone' parameter (IANA name), e.g.:
+    get_time(timezone="Asia/Tokyo")
 - For extraction, list, comparison, recommendation, or synthesis goals: your answer
   must be substantive — at least 3 sentences or a numbered/bulleted list of ≥ 3 items.
 - If HISTORY already contains a tool result for this goal, answer from that result
@@ -47,9 +52,10 @@ STRICT RULES:
   you already have a URL.
 - When a goal says "read the top N results" or "read each result", call fetch_url
   on each URL from the prior web_search result before synthesising. Snippets alone
-  are NOT sufficient — you must fetch the actual page content first.
-- When the user says "remember" something, call save_memory(text="...") with the
-  exact fact to store. Always do this before answering."""
+  are NOT sufficient — fetch the actual page content first.
+- When the user asks to "remember" something, use create_file to save the fact:
+    create_file(path="memory/{key}.txt", content="...the fact...")
+  Create the memory/ directory first with create_file if needed."""
 
 
 def _format_hits(hits: list[MemoryItem]) -> str:
@@ -69,7 +75,7 @@ def _format_history(history: list[dict]) -> str:
         if kind == "action":
             entries.append(
                 f"  iter {h['iter']}: TOOL {h['tool']} → "
-                f"{h.get('result_descriptor', '')[:300]}"
+                f"{h.get('result_descriptor', '')[:800]}"
             )
         elif kind == "answer":
             entries.append(
