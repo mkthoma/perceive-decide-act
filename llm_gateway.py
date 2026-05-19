@@ -300,11 +300,13 @@ async def chat(
                 "parsed": parsed,
             }
 
-        # All candidates tried — find shortest cooldown across initial set
-        # (not just the pruned list) to give permanently-failed providers a
-        # fresh chance on the next round.
+        # All candidates tried — find shortest wait across initial set:
+        # prefer soft cooldown (≤10 s), fall back to hard backoff (≤90 s).
+        # This lets the gateway recover from short rate-limit windows without
+        # the caller having to re-issue the request.
         now = time.time()
         min_wait: float | None = None
+        min_hard: float | None = None
         for cname in initial_candidates:
             prov_c = router.providers.get(cname)
             if prov_c is None:
@@ -314,16 +316,21 @@ async def chat(
                 continue
             state_c = router.state[cname]
             if state_c.unavailable_until > now:
-                continue  # hard backoff — skip
+                hard_wait = state_c.unavailable_until - now
+                if hard_wait <= 90 and (min_hard is None or hard_wait < min_hard):
+                    min_hard = hard_wait
+                continue
             wait_c = LIMITS.get(cname, {}).get("cooldown", 0) - (now - state_c.last_call)
             if 0 < wait_c <= 10 and (min_wait is None or wait_c < min_wait):
                 min_wait = wait_c
 
-        if min_wait is None:
-            break  # nothing worth waiting for
+        # Prefer soft cooldown; fall back to hard backoff if ≤90 s
+        effective_wait = min_wait if min_wait is not None else min_hard
+        if effective_wait is None:
+            break  # all providers in long-term backoff or day quota — give up
 
-        await asyncio.sleep(min_wait + 0.2)
-        # Restore initial candidate list so permanently-soft-failed providers retry
+        await asyncio.sleep(effective_wait + 0.2)
+        # Restore initial candidate list so all providers retry
         candidates = list(initial_candidates)
 
     raise RuntimeError(

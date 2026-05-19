@@ -149,7 +149,8 @@ def _summary(results: list[tuple[str, bool, float]]) -> None:
 
 # ── Runner ───────────────────────────────────────────────────────────────────
 
-_QUERY_TIMEOUT = 300  # seconds per query before we give up
+_QUERY_TIMEOUT = 450   # seconds per query before we give up
+_INTER_QUERY_DELAY = 60  # seconds between queries so Gemini 57s backoffs clear
 
 
 async def _run_one(query: str) -> tuple[str, float]:
@@ -170,7 +171,10 @@ async def main(indices: list[int] | None = None) -> None:
 
     results: list[tuple[str, bool, float]] = []
 
-    for n, label, query in selected:
+    for idx, (n, label, query) in enumerate(selected):
+        if idx > 0 and _INTER_QUERY_DELAY > 0:
+            print(dim(f"\n  (pausing {_INTER_QUERY_DELAY}s between queries — rate-limit headroom)\n"))
+            await asyncio.sleep(_INTER_QUERY_DELAY)
         _banner(label, n, total)
         _print_question(query)
         try:

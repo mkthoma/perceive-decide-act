@@ -162,8 +162,8 @@ def _ddg_search(query: str, max_results: int) -> list[dict]:
     ]
 
 
-_HTTPX_TIMEOUT = 12        # seconds for plain-HTTP fast-path
-_MAX_FETCH_CHARS = 100_000  # truncate very large pages
+_HTTPX_TIMEOUT = 12       # seconds for plain-HTTP fast-path
+_MAX_FETCH_CHARS = 20_000  # keep intro + key sections; enough for any fact extraction
 
 
 def _html_to_text(html_str: str) -> str:

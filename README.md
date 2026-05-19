@@ -86,7 +86,9 @@ The agent runs a bounded loop of at most 20 iterations. Each iteration executes 
 └─────────────────────────────────────────────────────┘
 ```
 
-The loop terminates when Perception marks all goals as `done`, or when `MAX_ITERATIONS` is reached.
+The loop terminates when all goals are marked `done`, or when `MAX_ITERATIONS` (20) is reached.
+
+**Perception is called only on the first iteration.** On iter 1 it decomposes the query into goals; from iter 2 onward the main loop reuses `prior_goals` directly and skips the Perception LLM call entirely. Goal done-flags are set in-place by `agent.py` the moment Decision emits an answer or a data-retrieval tool call completes an acquisition goal. This saves 1–2 LLM calls per query on free-tier providers.
 
 ---
 
@@ -112,17 +114,17 @@ The loop terminates when Perception marks all goals as `done`, or when `MAX_ITER
 
 ### Perception — `perception.py`
 
-**What it does:** The orchestrator. It decomposes the user query into an ordered list of goals on the first iteration, then updates done-flags on every subsequent iteration by inspecting the history.
+**What it does:** The orchestrator. It decomposes the user query into an ordered list of goals on the **first iteration only**. From iter 2 onward the main loop reuses `prior_goals` directly and skips the Perception LLM call.
 
 **How it works:**
 
 1. **First iteration** (`prior_goals` is empty): Perception sends the query, memory hits, and an empty prior-goals list to Gemini with `temperature=1.0`. The LLM decomposes the query into 1–4 short imperative goals ordered by logical dependency — fetch before extract, search before synthesize.
 
-2. **Subsequent iterations**: Perception sends the same query, the current history, and the prior goals. It outputs the goals in the **exact same order**, setting `done: true` only for goals that have a satisfying action or answer in history. Once `done`, a goal is **sticky** — it can never be flipped back.
+2. **Subsequent iterations**: `agent.py` reuses the existing `prior_goals` list without an LLM call. Done-flags are set immediately in the main loop whenever Decision emits an answer or a data-retrieval tool auto-completes an acquisition goal — there is no need for a second LLM pass to re-inspect history.
 
 3. **Artifact attachment**: For the first unfinished goal that requires reading a previously fetched artifact (e.g. "extract info from page"), Perception sets `artifact_index` pointing to the corresponding `[artifact N]` entry in the memory-hit list. The main loop resolves this index to the actual artifact ID stored by memory.
 
-**Why it matters:** Perception is the only role that can mark work as done. This prevents Decision from re-doing completed steps and ensures goals have stable positions (position = identity, not LLM-generated IDs that can hallucinate). Pinning Perception to Gemini (`provider="g"`) ensures reliable structured-output compliance for the goal list schema. `temperature=1.0` prevents Gemini 3.x from stalling in a low-entropy loop.
+**Why it matters:** Calling Perception only once (instead of every iteration) saves 1–3 LLM calls per query on free-tier providers whose rate limits are the primary bottleneck. Goal ordering is stable because positional identity is set at decomposition time and never changes. `temperature=1.0` prevents Gemini 3.x from stalling in a low-entropy loop.
 
 **Fallback:** If the Gemini call fails, Perception returns prior goals unchanged (or a single bare goal on the first iteration). The run degrades gracefully rather than crashing.
 
@@ -226,16 +228,21 @@ RULES:
 
 **How it works:**
 
-1. Decision builds a user message containing the current goal, memory hits, recent history (last 10 entries), and — when Perception has attached one — the full bytes of the artifact rendered inline as `ATTACHED ARTIFACTS`.
+1. Decision builds a user message containing the current goal, memory hits, recent history (last 10 entries), and — when the main loop has attached one or more artifacts — the full bytes rendered inline as `ATTACHED ARTIFACTS`. For synthesis goals, `agent.py` force-attaches **all artifacts produced during the current run** (up to 3), so Decision never needs to re-fetch data it already has.
 
 2. It sends this message to the gateway with `auto_route="decision"` and the full MCP tool list. The gateway classifies the request size (TINY or LARGE), selects a worker tier, and dispatches to the first available provider.
 
 3. The response is inspected for tool calls first. If the LLM emitted a function call, a `ToolCall` is returned. Otherwise, the text content becomes the answer.
 
-**The strict rule enforced by the system prompt:**
+**Key rules enforced by the system prompt:**
 - If history already contains the information, answer directly — do not call a tool again.
 - Artifact handles (`art:…`) are never valid arguments to a tool — bytes are available inline in ATTACHED ARTIFACTS.
 - Extraction, synthesis, and comparison goals must produce a substantive answer (≥ 3 sentences or a numbered list).
+- If a goal asks for an action with no matching tool (set a reminder, send an email, etc.), answer with a clear text description rather than looping.
+- If a MEMORY HIT descriptor already contains the answer, answer directly from it — no tool call needed.
+- For recalling previously saved facts, call `read_file(path="memory/...")`. If memory hits show a `memory/` file was written, read it before answering.
+- Prefer `web_search` over `fetch_url` by default; only call `fetch_url` when the full rendered content of a specific page is needed and search snippets are insufficient.
+- After 3 consecutive empty `web_search` results for the same goal, stop searching and answer from training knowledge.
 
 **Why it matters:** Separating Decision from Action ensures the LLM never directly executes code. Decision emits intent (`ToolCall`); Action executes it through MCP. This also means Decision can be retried or replaced independently without touching the execution layer. The `auto_route` lets the gateway pick the cheapest provider that fits the request size — a small fetch decision goes to a fast TINY-tier model; an extraction decision with 50 KB of attached content goes to a large-context LARGE-tier provider.
 
@@ -250,14 +257,30 @@ You receive one GOAL and supporting context. You must return EXACTLY ONE of:
 
 STRICT RULES:
 - NEVER return both answer and tool_call in the same response.
+- Before choosing a tool_call, verify the action maps to an available tool.
+  If a goal asks you to DO something for which no tool exists (set a calendar
+  reminder, send an email, post to social media, etc.), answer directly with a
+  clear text description — do NOT attempt to call a non-existent tool or loop.
+- MEMORY HITS are part of your context. If a hit's descriptor already contains
+  the answer to the current GOAL, answer directly from it.
 - Strings starting with "art:" are internal artifact handles. Do NOT pass them
   as path or url arguments to any tool. The artifact bytes are in ATTACHED ARTIFACTS.
+- If HISTORY contains a [STOP] line, answer directly from ATTACHED ARTIFACTS.
+- For real-time data (current time, live exchange rates, today's weather),
+  ALWAYS call the appropriate tool.
+- For WEATHER data, use web_search. Do NOT use fetch_url for weather.
 - For extraction, list, comparison, recommendation, or synthesis goals: your answer
   must be substantive — at least 3 sentences or a numbered/bulleted list of ≥ 3 items.
-- If HISTORY already contains the information needed for this goal, answer directly
-  without calling a tool again.
-- Pick the most specific tool for the task. Prefer fetch_url over web_search when
-  you already have a URL.
+- If HISTORY already contains a tool result for this goal, answer from that result
+  directly — do not call the same tool again.
+- If HISTORY shows 3 or more consecutive web_search results with "No results found"
+  for the same goal, STOP searching and answer from your own knowledge.
+- If HISTORY contains "[SEARCH_EXHAUSTED:" for this goal, answer from your own
+  knowledge — do NOT call web_search or fetch_url again.
+- Prefer web_search over fetch_url by default.
+- If HISTORY contains ANY [tool_timeout] result, switch to web_search immediately.
+- When the user asks to "remember" something, use create_file(path="memory/{key}.txt").
+- To RECALL a previously remembered fact, call read_file on the memory/ path.
 ```
 
 #### PoP validation
@@ -336,13 +359,15 @@ STRICT RULES:
 
 1. **Guard check**: Before any dispatch, Action inspects the tool arguments for `art:…` handles in path/URL fields. If found, it returns an error descriptor immediately — this prevents Decision from accidentally passing a stale artifact handle to a tool that expects a real URL or file path.
 
-2. **MCP dispatch**: Calls `session.call_tool(name, arguments)` wrapped in `asyncio.wait_for` with a **60-second timeout**. If the tool does not respond in time (e.g. `crawl4ai` rendering a large page), Action returns a `[tool_timeout]` error descriptor. The agent loop treats this as an error, and Decision falls back to `web_search` for the information instead.
+2. **MCP dispatch**: Calls `session.call_tool(name, arguments)` wrapped in `asyncio.wait_for` with a **30-second timeout**. If the tool does not respond in time (e.g. `crawl4ai` rendering a large page), Action returns a `[tool_timeout]` error descriptor. The agent loop treats this as an error, and Decision falls back to `web_search` for the information instead.
 
 3. **JSON post-processing**: The MCP server returns typed Python objects (`list[dict]`, `dict`) which FastMCP serialises as JSON strings. Action unwraps these into clean human-readable text before passing them to Decision — search results become `Title / URL / Snippet` blocks, file tool responses become plain file content, etc.
 
 4. **Artifact threshold**: If the tool response exceeds `ARTIFACT_THRESHOLD_BYTES` (4 KB), the bytes are written to the content-addressable artifact store (`state/artifacts/`). The returned descriptor includes the artifact handle (`art:<sha256[:16]>`) and a 200-character preview. If the response is small enough, it is returned as raw text with no artifact created.
 
-**Why it matters:** The artifact threshold is what keeps Decision's context from bloating. A 50 KB Wikipedia page is stored once as `art:4c163…` and referred to by handle throughout the remaining iterations. Only when Perception explicitly attaches it does Decision see the bytes — and only the bytes it actually needs, not every tool result from every prior iteration. The `art:` guard closes the loop: Decision is told not to pass handles to tools, and Action enforces that rule at execution time.
+**Content size is bounded at the Action layer.** `fetch_url` in `mcp_server.py` hard-caps all fetched content at **20,000 characters** (`_MAX_FETCH_CHARS`). This is the canonical control point — it determines the maximum bytes stored in any artifact. The `_MAX_ARTIFACT_CHARS = 50,000` limit in `decision.py` is a secondary safety net only and should never be reached in normal operation.
+
+**Why it matters:** The 20 KB content cap means a Wikipedia article that is 80 KB raw is truncated to the infobox and opening sections (~20 KB) before it becomes an artifact — sufficient for any fact-extraction task. When the artifact is later force-attached to a synthesis or extraction goal, Decision receives at most ~5,000 tokens of artifact content, well within every provider's context window. The `art:` guard closes the loop: Decision is told not to pass handles to tools, and Action enforces that rule at execution time.
 
 ---
 
@@ -818,7 +843,12 @@ uv run python test_all.py 3 4      # C1 and C2 only (1-based index)
 | 4 | Query C2 | Recall mom's birthday (run after C1) |
 | 5 | Query D | Search asyncio best practices, read top 3 results, list common advice |
 
-Each query has a **180-second timeout**. A timed-out query is marked as failed in the summary table but does not stop the remaining queries from running.
+Each query has a **450-second timeout**. A timed-out query is marked as failed in the summary table but does not stop the remaining queries from running. A **60-second inter-query delay** is inserted between queries to let Gemini's 57-second hard backoff clear before the next run.
+
+> **Windows / stdout buffering:** If you redirect output to a file or pipe it through another tool, prefix the command with `PYTHONUNBUFFERED=1` (or use `python -u`) so log lines appear in real time:
+> ```powershell
+> $env:PYTHONUNBUFFERED = "1"; uv run python -u test_all.py
+> ```
 
 ---
 
@@ -839,7 +869,7 @@ rm state/memory.json
 | Tool | Description |
 |---|---|
 | `web_search` | Four-provider chain: **Tavily → Exa → Firecrawl → DuckDuckGo**. Returns titles, URLs, snippets. Hard-capped at 5 results. Usage logged to `usage.json` with monthly rollover. |
-| `fetch_url` | crawl4ai headless Chromium — clean markdown from any URL. Subject to 60 s Action-layer timeout; Decision falls back to `web_search` on `[tool_timeout]`. |
+| `fetch_url` | Two-phase fetch: **httpx fast-path** first (~3 s, plain HTTP) then **crawl4ai headless Chromium** fallback for JS-heavy pages. Content hard-capped at 20,000 chars (`_MAX_FETCH_CHARS`). Subject to 30 s Action-layer timeout; Decision falls back to `web_search` on `[tool_timeout]`. |
 | `get_time` | Current time in any IANA timezone (e.g. `"Asia/Tokyo"`) |
 | `currency_convert` | Live rates via Frankfurter API |
 | `read_file` | Read a UTF-8 file from `sandbox/` |
@@ -872,13 +902,15 @@ Provider errors and usage counts are tracked in `usage.json` (monthly rollover).
 - `fallback_used: true` in `router_decision` — all router-pool workers were rate-limited; the gateway fell back to the deterministic token-count rule. The worker call still succeeds.
 - Gemini 3.x loops at `temperature=0` — Perception is pinned to `temperature=1.0` to prevent this.
 - Cerebras `queue_exceeded` errors are routine on the free tier and handled by router failover to Groq.
+- **Hard-backoff retry**: when all providers are in a rate-limit hard backoff, the gateway waits for the shortest pending backoff ≤ 90 s before retrying instead of raising immediately. Backoffs longer than 90 s are skipped in favour of other providers.
+- **Provider HTTP timeouts**: Gemini 45 s, OpenAI-compatible (Groq, Cerebras, etc.) 45 s, Ollama 600 s (local model).
 
 ---
 
 ## Reliability notes
 
-### fetch_url timeouts
-`fetch_url` uses crawl4ai (headless Chromium) which can be slow on heavy external pages. Action enforces a **60-second hard timeout** — if exceeded, the agent receives `[tool_timeout]` and Decision falls back to `web_search`. To avoid this for research queries, add a Tavily or Exa API key so `web_search` returns rich snippets that Decision can synthesise without needing to fetch each URL.
+### fetch_url performance and timeouts
+`fetch_url` attempts a plain HTTP fast-path via `httpx` first (~3 s). Only if that returns too little content does it fall through to `crawl4ai` (headless Chromium), which is slower but handles JavaScript-rendered pages. Action enforces a **30-second hard timeout** — if exceeded, the agent receives `[tool_timeout]` and Decision switches to `web_search`. Fetched content is hard-capped at **20,000 characters** in `mcp_server.py`; this keeps artifacts small enough that they can be force-attached inline without exceeding any provider's context window.
 
 ### Search reliability
 Without any key, DuckDuckGo is the only search provider — it is free but rate-limited and sometimes returns empty results. The fallback chain (Tavily → Exa → Firecrawl → DuckDuckGo) means the agent degrades gracefully as each tier is exhausted, but for consistent results add at least one paid key.
