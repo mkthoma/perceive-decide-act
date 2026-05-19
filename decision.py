@@ -30,6 +30,11 @@ STRICT RULES:
   must be substantive — at least 3 sentences or a numbered/bulleted list of ≥ 3 items.
 - If HISTORY already contains a tool result for this goal, answer from that result
   directly — do not call the same tool again.
+- If HISTORY shows 3 or more consecutive web_search results with "No results found"
+  for the same goal, STOP searching. Answer from your own knowledge or note the
+  information is unavailable — never search the same topic a fourth time.
+- If HISTORY contains "[SEARCH_EXHAUSTED:" for this goal, do NOT call any tool.
+  Answer immediately from your knowledge, even if incomplete.
 - Pick the most specific tool for the task. Prefer fetch_url over web_search when
   you already have a URL."""
 

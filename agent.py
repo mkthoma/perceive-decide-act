@@ -268,6 +268,40 @@ async def run(query: str) -> str:
                     goal.done = True
                     print(f"  [auto-done] acquisition goal satisfied by tool call")
 
+                # Hard-stop repeated empty searches: if the last 3 actions for
+                # this goal all returned "No results found", skip further tool
+                # calls and let Decision answer from its knowledge next iter.
+                if is_empty:
+                    recent_empty = sum(
+                        1 for h in history[-6:]
+                        if h.get("kind") == "action"
+                        and h.get("goal_id") == goal.id
+                        and "no results found" in h.get("result_descriptor", "").lower()
+                    )
+                    if recent_empty >= 2:
+                        print(f"  [no-search] 3+ empty results — skipping tool, forcing answer next iter")
+                        # Remove tools from mcp_tools for the NEXT decision call
+                        # by injecting a sentinel into history
+                        history.append(
+                            {
+                                "iter": it,
+                                "kind": "action",
+                                "goal_id": goal.id,
+                                "tool": tc.name,
+                                "arguments": tc.arguments,
+                                "result_descriptor": result_text[:300] + " [SEARCH_EXHAUSTED: answer from knowledge]",
+                                "artifact_id": None,
+                            }
+                        )
+                        memory.record_outcome(
+                            tool_call=tc,
+                            result_text=result_text,
+                            artifact_id=None,
+                            run_id=run_id,
+                            goal_id=goal.id,
+                        )
+                        continue
+
                 memory.record_outcome(
                     tool_call=tc,
                     result_text=result_text,
