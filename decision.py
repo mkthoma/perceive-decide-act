@@ -31,6 +31,9 @@ STRICT RULES:
   reminder, send an email, post to social media, create a document, book a
   flight, etc.), answer directly with a clear text description of what should
   be done — do NOT attempt to call a non-existent tool or loop trying.
+- MEMORY HITS are part of your context. If a hit's descriptor already contains
+  the answer to the current GOAL (e.g. "[fact] Mom's birthday is May 15, 2026"),
+  answer directly from it — do NOT say the information is unavailable.
 - Strings starting with "art:" are internal artifact handles. Do NOT pass them
   as path or url arguments to any tool. The artifact bytes are in ATTACHED ARTIFACTS.
 - If HISTORY contains a [STOP] line, the previous tool call was illegal.
@@ -59,7 +62,11 @@ STRICT RULES:
 - When the user asks to "remember" something, use create_file to save the fact:
     create_file(path="memory/{key}.txt", content="...the fact...")
   Parent directories are created automatically — do NOT call create_file just to
-  make a directory; go straight to creating the file."""
+  make a directory; go straight to creating the file.
+- To RECALL a previously remembered fact, call read_file on the relevant
+  memory/ path, e.g. read_file(path="memory/moms_birthday.txt"). If MEMORY HITS
+  include a [tool_outcome] showing a memory/ file was written for a related topic,
+  read that file — do NOT answer "I don't know" without checking first."""
 
 
 def _format_hits(hits: list[MemoryItem]) -> str:
@@ -134,7 +141,7 @@ async def next_step(
         auto_route="decision",
         tools=mcp_tools if mcp_tools else None,
         tool_choice="auto" if mcp_tools else None,
-        temperature=0.7,
+        temperature=1.0,
     )
 
     # Prefer explicit tool calls; arguments is already a dict in gateway response
