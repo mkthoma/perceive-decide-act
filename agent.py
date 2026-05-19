@@ -53,8 +53,9 @@ _SYNTHESIS_KW = frozenset(
 
 # First-word verbs that mean "go get the data" — goal is satisfied by a
 # successful tool call alone, no textual answer needed.
+# Exclude "check" (implies verify/report) and "find" (implies selection).
 _ACQUISITION_VERBS = frozenset(
-    "fetch download retrieve get load check search find look".split()
+    "fetch download retrieve get load search look".split()
 )
 
 
@@ -262,7 +263,8 @@ async def run(query: str) -> str:
                 # no LLM answer is needed. This prevents Decision from looping
                 # trying to re-read an artifact handle it can't use as a path.
                 is_error = result_text.startswith("[") and "error" in result_text[:80].lower()
-                if not is_error and _is_acquisition_goal(goal.text):
+                is_empty = "no results found" in result_text[:80].lower() or result_text.strip() == "(empty directory)"
+                if not is_error and not is_empty and _is_acquisition_goal(goal.text):
                     goal.done = True
                     print(f"  [auto-done] acquisition goal satisfied by tool call")
 
