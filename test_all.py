@@ -61,14 +61,14 @@ QUERIES: list[tuple[str, str]] = [
         ),
     ),
     (
-        "Query C1 — Durable memory write",
+        "Query C Part 1 — Durable memory write",
         (
             "My mom's birthday is 15 May 2026. Remember that and give me a "
             "calendar reminder for two weeks before and on the day."
         ),
     ),
     (
-        "Query C2 — Durable memory recall",
+        "Query C Part 2 — Durable memory recall",
         "When is mom's birthday?",
     ),
     (
