@@ -33,7 +33,7 @@ from router import DEFAULT_ROUTER_ORDER, LIMITS, Router, RouterPool, resolve
 
 # ── Routing config (mirrors main.py) ────────────────────────────────────────
 
-_DEFAULT_ORDER = "ollama,gemini,nvidia,groq,cerebras,openrouter,github"
+_DEFAULT_ORDER = "gemini,groq,cerebras,nvidia,openrouter,github,ollama"
 
 # Min context window (tokens) required for each tier.
 # Candidates are always drawn from router.order (LLM_ORDER) to respect user preference.
