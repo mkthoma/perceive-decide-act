@@ -40,6 +40,8 @@ STRICT RULES:
   must be substantive — at least 3 sentences or a numbered/bulleted list of ≥ 3 items.
 - If HISTORY already contains a tool result for this goal, answer from that result
   directly — do not call the same tool again.
+- If ATTACHED ARTIFACTS do not contain the data needed for this goal, do NOT answer
+  saying the data is missing. Call the appropriate tool to fetch it instead.
 - If HISTORY shows 3 or more consecutive web_search results with "No results found"
   for the same goal, STOP searching. Answer from your own knowledge or note the
   information is unavailable — never search the same topic a fourth time.

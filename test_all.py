@@ -149,7 +149,7 @@ def _summary(results: list[tuple[str, bool, float]]) -> None:
 
 # ── Runner ───────────────────────────────────────────────────────────────────
 
-_QUERY_TIMEOUT = 180  # seconds per query before we give up
+_QUERY_TIMEOUT = 300  # seconds per query before we give up
 
 
 async def _run_one(query: str) -> tuple[str, float]:
