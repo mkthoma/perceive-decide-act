@@ -32,34 +32,25 @@ STRICT RULES:
   Answer directly from ATTACHED ARTIFACTS — do NOT call any tool.
 - For real-time data (current time, live exchange rates, today's weather),
   ALWAYS call the appropriate tool — never answer from memory or assumptions.
-- For WEATHER data, call fetch_url with the wttr.in JSON API — it is free,
-  requires no key, and always returns a real forecast:
-    fetch_url(url="https://wttr.in/{City}?format=j1")
-  e.g. fetch_url(url="https://wttr.in/Tokyo?format=j1")
-  Only fall back to web_search for weather if the above fails.
+- For WEATHER data, use web_search — e.g. web_search("Tokyo weather Saturday forecast").
+  Do NOT use fetch_url for weather; headless rendering of weather sites is too slow.
 - get_time uses a 'timezone' parameter (IANA name), e.g.:
     get_time(timezone="Asia/Tokyo")
 - For extraction, list, comparison, recommendation, or synthesis goals: your answer
   must be substantive — at least 3 sentences or a numbered/bulleted list of ≥ 3 items.
 - If HISTORY already contains a tool result for this goal, answer from that result
   directly — do not call the same tool again.
+- If ATTACHED ARTIFACTS do not contain the data needed for this goal, do NOT answer
+  saying the data is missing. Call the appropriate tool to fetch it instead.
 - If HISTORY shows 3 or more consecutive web_search results with "No results found"
   for the same goal, STOP searching. Answer from your own knowledge or note the
   information is unavailable — never search the same topic a fourth time.
-- If HISTORY contains "[SEARCH_EXHAUSTED:" for this goal, do NOT call web_search again.
-  Instead, pivot to fetch_url on official documentation or well-known resource pages:
-    • Python stdlib: fetch_url(url="https://docs.python.org/3/library/{module}.html")
-    • Real Python:   fetch_url(url="https://realpython.com/async-io-python/")
-    • GitHub docs, MDN, official project docs — whatever fits the topic.
-  Only fall back to answering from your own knowledge if fetch_url also fails.
-- Pick the most specific tool for the task. Prefer fetch_url over web_search when
-  you already have a URL.
-- When a goal says "read the top N results" or "read each result", call fetch_url
-  on each URL from the prior web_search result before synthesising. Snippets alone
-  are NOT sufficient — fetch the actual page content first.
-- If HISTORY contains a [tool_timeout] result for a fetch_url call, that URL is
-  too slow to render. DO NOT retry the same URL. Instead fall back to web_search
-  to find the same information from a different source.
+- If HISTORY contains "[SEARCH_EXHAUSTED:" for this goal, answer from your own
+  knowledge — do NOT call web_search or fetch_url again.
+- Prefer web_search over fetch_url by default. Only call fetch_url when you need
+  the FULL rendered content of a specific page AND web_search snippets are not enough.
+- If HISTORY contains ANY [tool_timeout] result, do NOT call fetch_url again for
+  this goal. Switch to web_search immediately and answer from those results.
 - When the user asks to "remember" something, use create_file to save the fact:
     create_file(path="memory/{key}.txt", content="...the fact...")
   Create the memory/ directory first with create_file if needed."""
