@@ -195,22 +195,29 @@ async def run(query: str) -> str:
                 hits = memory.read(query, history)
 
                 # ── Perception ─────────────────────────────────────────── #
-                try:
-                    obs = await perception.observe(
-                        query, hits, history, prior_goals, run_id
-                    )
-                except Exception as exc:
-                    print(f"\n[agent] ERROR in perception: {exc}")
-                    fatal_error = str(exc)
-                    break
-                prior_goals = obs.goals
-
-                # Guard: Perception must never mark brand-new goals as done.
-                # Memory hits from prior runs can mislead Gemini into thinking
-                # the task is already complete before any work this run.
+                # Only call Perception on the first iteration to decompose
+                # the query into goals.  On subsequent iterations the done
+                # flags are already managed by agent.py (set immediately when
+                # Decision answers or a tool auto-completes an acquisition
+                # goal), so another LLM call would return the same goal list
+                # unchanged — wasteful when free-tier providers are scarce.
                 if it == 1:
+                    try:
+                        obs = await perception.observe(
+                            query, hits, history, prior_goals, run_id
+                        )
+                    except Exception as exc:
+                        print(f"\n[agent] ERROR in perception: {exc}")
+                        fatal_error = str(exc)
+                        break
+                    prior_goals = obs.goals
+                    # Guard: memory hits from prior runs can make Gemini think
+                    # the task is already complete before any work this run.
                     for g in prior_goals:
                         g.done = False
+                else:
+                    # Reuse prior_goals directly — no LLM call needed.
+                    obs = Observation(goals=list(prior_goals))
 
                 print(f"\n--- iter {it} ---")
                 _print_goals(obs.goals)
@@ -231,22 +238,35 @@ async def run(query: str) -> str:
                     attached.append((goal.attach_artifact_id, raw))
                     print(f"  [attach] {goal.attach_artifact_id} ({len(raw):,} bytes)")
 
-                # Force-attach safety net: synthesis goals with no attachment.
-                # Only attach an artifact if its keywords overlap with the goal text
-                # so we don't accidentally attach an unrelated cached artifact.
+                # For synthesis goals attach ALL artifacts collected this run
+                # (up to 3) so Decision has every piece of data it needs in one
+                # call.  Falls back to keyword-filtered memory hits if the run
+                # has produced no artifacts yet.
                 if not attached and _is_synthesis_goal(goal.text):
-                    goal_words = set(goal.text.lower().split())
-                    for hit in reversed(hits):
-                        if hit.artifact_id and artifacts.exists(hit.artifact_id):
-                            artifact_kw = set(getattr(hit, "keywords", []))
-                            if not artifact_kw or (goal_words & artifact_kw):
-                                raw = artifacts.get_bytes(hit.artifact_id)
-                                attached.append((hit.artifact_id, raw))
-                                print(
-                                    f"  [force-attach] {hit.artifact_id} "
-                                    f"({len(raw):,} bytes)"
-                                )
+                    seen: set[str] = set()
+                    for h in history:
+                        art_id = h.get("artifact_id")
+                        if art_id and art_id not in seen and artifacts.exists(art_id):
+                            raw = artifacts.get_bytes(art_id)
+                            attached.append((art_id, raw))
+                            seen.add(art_id)
+                            print(f"  [force-attach] {art_id} ({len(raw):,} bytes)")
+                            if len(attached) >= 3:
                                 break
+                    # Fallback: keyword-filtered memory hits
+                    if not attached:
+                        goal_words = set(goal.text.lower().split())
+                        for hit in reversed(hits):
+                            if hit.artifact_id and artifacts.exists(hit.artifact_id):
+                                artifact_kw = set(getattr(hit, "keywords", []))
+                                if not artifact_kw or (goal_words & artifact_kw):
+                                    raw = artifacts.get_bytes(hit.artifact_id)
+                                    attached.append((hit.artifact_id, raw))
+                                    print(
+                                        f"  [force-attach] {hit.artifact_id} "
+                                        f"({len(raw):,} bytes)"
+                                    )
+                                    break
 
                 # ── Decision ───────────────────────────────────────────── #
                 try:
