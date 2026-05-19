@@ -61,7 +61,7 @@ _ACQUISITION_VERBS = frozenset(
 # Only these tools can trigger acquisition-goal auto-done.
 # Utility tools like get_time, currency_convert should NOT mark a goal done
 # just because they returned a value (e.g. get_time for "search weather" goal).
-_AUTO_DONE_TOOLS = frozenset({"web_search", "fetch_url", "read_file", "list_files"})
+_AUTO_DONE_TOOLS = frozenset({"web_search", "fetch_url", "read_file", "list_dir"})
 
 
 # --------------------------------------------------------------------------- #

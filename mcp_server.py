@@ -3,6 +3,8 @@
 Search: Tavily (TAVILY_API_KEY in .env) with DDGS fallback.
 Crawl:  crawl4ai (async, JS-capable) with httpx fallback.
 File tools operate within sandbox/.
+Weather: Open-Meteo (free, no API key required).
+Memory: save_memory() writes durable facts to state/memory.json.
 
 After first install, run the crawl4ai setup to install Playwright browsers:
   uv run crawl4ai-setup
@@ -12,8 +14,10 @@ Start with: uv run python mcp_server.py
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
+import uuid
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -29,7 +33,25 @@ mcp = FastMCP("agent-tools")
 _SANDBOX = Path("sandbox")
 _SANDBOX.mkdir(parents=True, exist_ok=True)
 
+_STATE_DIR = Path("state")
+_STATE_DIR.mkdir(parents=True, exist_ok=True)
+_MEMORY_FILE = _STATE_DIR / "memory.json"
+
 _TAVILY_KEY = os.getenv("TAVILY_API_KEY")
+
+# WMO weather interpretation codes → human-readable descriptions
+_WMO_CODES: dict[int, str] = {
+    0: "Clear sky",
+    1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
+    45: "Fog", 48: "Icy fog",
+    51: "Light drizzle", 53: "Moderate drizzle", 55: "Dense drizzle",
+    61: "Slight rain", 63: "Moderate rain", 65: "Heavy rain",
+    71: "Slight snow", 73: "Moderate snow", 75: "Heavy snow",
+    77: "Snow grains",
+    80: "Slight showers", 81: "Moderate showers", 82: "Violent showers",
+    85: "Slight snow showers", 86: "Heavy snow showers",
+    95: "Thunderstorm", 96: "Thunderstorm w/ hail", 99: "Heavy thunderstorm",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -108,11 +130,15 @@ def web_search(query: str, max_results: int = 5) -> str:
             results = resp.get("results", [])
             if results:
                 return _format_search_results(results, url_key="url", snippet_key="content")
-        except Exception as exc:
+        except Exception:
             pass  # fall through to DDGS
 
     try:
-        from duckduckgo_search import DDGS
+        # Package was renamed from duckduckgo_search to ddgs
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            from duckduckgo_search import DDGS
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
         if not results:
@@ -209,6 +235,138 @@ def get_time(tz: str = "UTC") -> str:
             # Last resort: use stdlib UTC (no tzdata needed)
             zone = timezone.utc
     return datetime.now(zone).isoformat()
+
+
+@mcp.tool()
+async def get_weather(city: str, days: int = 3) -> str:
+    """Get current and forecast weather for any city (no API key required).
+
+    Uses Open-Meteo geocoding + weather API — free, reliable, no sign-up.
+    Always use this tool for weather questions; do NOT use web_search for weather.
+
+    Args:
+        city: City name, e.g. 'Tokyo', 'London', 'New York'.
+        days: Number of forecast days to return (1–7, default 3).
+    """
+    days = max(1, min(7, days))
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            # Step 1: geocode city → lat/lon
+            geo = await client.get(
+                "https://geocoding-api.open-meteo.com/v1/search",
+                params={"name": city, "count": 1, "language": "en", "format": "json"},
+            )
+            geo.raise_for_status()
+            geo_data = geo.json()
+            results = geo_data.get("results")
+            if not results:
+                return f"[get_weather] City not found: {city!r}"
+            loc = results[0]
+            lat, lon = loc["latitude"], loc["longitude"]
+            city_label = f"{loc.get('name', city)}, {loc.get('country', '')}"
+
+            # Step 2: fetch forecast
+            wx = await client.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "daily": (
+                        "temperature_2m_max,temperature_2m_min,"
+                        "precipitation_sum,weathercode,windspeed_10m_max"
+                    ),
+                    "current_weather": "true",
+                    "timezone": "auto",
+                    "forecast_days": days,
+                },
+            )
+            wx.raise_for_status()
+            data = wx.json()
+
+        daily = data.get("daily", {})
+        dates  = daily.get("time", [])
+        t_max  = daily.get("temperature_2m_max", [])
+        t_min  = daily.get("temperature_2m_min", [])
+        precip = daily.get("precipitation_sum", [])
+        codes  = daily.get("weathercode", [])
+        wind   = daily.get("windspeed_10m_max", [])
+
+        cur    = data.get("current_weather", {})
+        cur_t  = cur.get("temperature", "?")
+        cur_d  = _WMO_CODES.get(int(cur.get("weathercode", 0)), "Unknown")
+
+        lines = [
+            f"Weather for {city_label}",
+            f"Current: {cur_t}°C, {cur_d}",
+            "",
+            "Forecast:",
+        ]
+        for i, date in enumerate(dates):
+            code = int(codes[i]) if i < len(codes) else 0
+            desc = _WMO_CODES.get(code, f"Code {code}")
+            lo   = t_min[i]  if i < len(t_min)  else "?"
+            hi   = t_max[i]  if i < len(t_max)  else "?"
+            p    = f"{precip[i]:.1f}mm" if i < len(precip) else "?"
+            w    = f"{wind[i]:.0f}km/h" if i < len(wind)   else "?"
+            lines.append(f"  {date}: {lo}–{hi}°C, {desc}, Rain: {p}, Wind: {w}")
+
+        return "\n".join(lines)
+
+    except Exception as exc:
+        return f"[get_weather error] {exc}"
+
+
+@mcp.tool()
+def save_memory(text: str) -> str:
+    """Save a fact or note to persistent memory for retrieval in future sessions.
+
+    Use this whenever the user asks you to 'remember' something.
+    The stored text will be searchable by keyword in all future runs.
+
+    Args:
+        text: The fact or note to save, e.g. "Mom's birthday is May 15, 2026".
+    """
+    _STOPWORDS = frozenset(
+        "a an the and or but in on at to for of with is was are were be been "
+        "it its this that these those i my me we our you your he she they their "
+        "what when where how why which who do did does have has had will would "
+        "could should may might can not no yes get give tell find show make go "
+        "take use want need know about just from by up out if so".split()
+    )
+
+    try:
+        # Load existing items
+        items: list[dict] = []
+        if _MEMORY_FILE.exists():
+            try:
+                items = json.loads(_MEMORY_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                items = []
+
+        # Extract keywords
+        tokens = re.findall(r"\b[a-z0-9]+\b", text.lower())
+        keywords = [t for t in tokens if t not in _STOPWORDS and len(t) > 1][:15]
+
+        new_item = {
+            "id": uuid.uuid4().hex[:12],
+            "kind": "fact",
+            "keywords": keywords,
+            "descriptor": text[:120],
+            "value": {"text": text},
+            "artifact_id": None,
+            "source": "save_memory_tool",
+            "run_id": "manual",
+            "goal_id": None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        items.append(new_item)
+        _MEMORY_FILE.write_text(
+            json.dumps(items, indent=2, default=str),
+            encoding="utf-8",
+        )
+        return f"ok — remembered: {text[:80]}"
+    except Exception as exc:
+        return f"[save_memory error] {exc}"
 
 
 @mcp.tool()
