@@ -6,10 +6,16 @@ selects TINY or LARGE tier based on prompt size.
 """
 from __future__ import annotations
 
+import re
+
 import llm_gateway as gw
 from schemas import DecisionOutput, Goal, MemoryItem, ToolCall
 
 _MAX_ARTIFACT_CHARS = 80_000  # ~20k tokens; truncate larger artifacts
+
+# Matches vLLM / Groq-style text function call markup that some models emit
+# instead of native tool_calls:  <function(name){...}</function>
+_FC_RE = re.compile(r"<function\((\w+)\)\s*(\{.*?\})\s*</function>", re.DOTALL)
 
 _SYSTEM = """\
 You are DECISION, the action selector in an agentic loop.
@@ -123,6 +129,29 @@ async def next_step(
         )
 
     text = gw.extract_text(resp).strip()
+
+    # Some models (vLLM, Groq-style) emit tool calls as text markup instead of
+    # native tool_calls.  Detect and parse <function(name){...}</function>.
+    fc_match = _FC_RE.search(text)
+    if fc_match:
+        try:
+            import json as _json
+            fn_name = fc_match.group(1)
+            raw_args = fc_match.group(2)
+            args = _json.loads(raw_args)
+            # Coerce string integers to int for known numeric parameters
+            for key in ("max_results",):
+                if key in args and isinstance(args[key], str):
+                    try:
+                        args[key] = int(args[key])
+                    except ValueError:
+                        pass
+            return DecisionOutput(
+                tool_call=ToolCall(name=fn_name, arguments=args)
+            )
+        except Exception:
+            pass  # fall through to text answer
+
     # Some LLMs prefix their response with the option label ("answer\n...").
     # Strip it so it doesn't pollute the final answer shown to the user.
     lower = text.lower()
