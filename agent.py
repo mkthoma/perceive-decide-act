@@ -63,6 +63,13 @@ _ACQUISITION_VERBS = frozenset(
 # just because they returned a value (e.g. get_time for "search weather" goal).
 _AUTO_DONE_TOOLS = frozenset({"web_search", "fetch_url", "read_file", "list_dir"})
 
+# Words that signal an answer is expected — goal is NOT purely data retrieval.
+# "Fetch https://... and tell me his birth date" needs an ANSWER after the fetch.
+_ANSWER_MARKERS = frozenset(
+    "tell give describe explain list summarize compare "
+    "what when how why which who does did has have".split()
+)
+
 
 # --------------------------------------------------------------------------- #
 # Helpers                                                                       #
@@ -94,12 +101,17 @@ def _is_acquisition_goal(text: str) -> bool:
     """True when a goal is satisfied purely by executing the tool call.
 
     "Fetch the Wikipedia page" → done once fetch_url succeeds.
+    "Fetch https://... and tell me his birth date" → NOT acquisition;
+      contains answer markers ("tell") so an ANSWER is still needed.
     "Find the best activity based on weather" → NOT acquisition (contains
-    synthesis keywords), needs an ANSWER.
+      synthesis keywords), needs an ANSWER.
     """
     words = text.lower().split()
-    return bool(words) and words[0] in _ACQUISITION_VERBS and not (
-        _SYNTHESIS_KW & set(words)
+    return (
+        bool(words)
+        and words[0] in _ACQUISITION_VERBS
+        and not (_SYNTHESIS_KW & set(words))
+        and not (_ANSWER_MARKERS & set(words))
     )
 
 
@@ -362,17 +374,30 @@ async def run(query: str) -> str:
             hits = memory.read(query, history)
             synth_goal = Goal(text=query)
             attached: list[tuple[str, bytes]] = []
-            for hit in reversed(hits):
-                if hit.artifact_id and artifacts.exists(hit.artifact_id):
-                    raw = artifacts.get_bytes(hit.artifact_id)
-                    attached.append((hit.artifact_id, raw))
+            # Prefer the most recent artifact from the run's own history;
+            # memory hits may surface stale artifacts from earlier runs.
+            for h in reversed(history):
+                art_id = h.get("artifact_id")
+                if art_id and artifacts.exists(art_id):
+                    raw = artifacts.get_bytes(art_id)
+                    attached.append((art_id, raw))
                     break
+            if not attached:
+                for hit in reversed(hits):
+                    if hit.artifact_id and artifacts.exists(hit.artifact_id):
+                        raw = artifacts.get_bytes(hit.artifact_id)
+                        attached.append((hit.artifact_id, raw))
+                        break
             async with stdio_client(_MCP_PARAMS) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     out = await decision.next_step(synth_goal, hits, attached, history, [])
             if out.is_answer and out.answer:
-                answer = out.answer
+                # Guard: discard system-prompt echoes (some models repeat the
+                # system message when confused by an unusual no-tools context).
+                _echo_markers = ("You are DECISION", "STRICT RULES:", "You are an")
+                if not any(out.answer.startswith(m) for m in _echo_markers):
+                    answer = out.answer
         except Exception:
             pass
 
