@@ -271,7 +271,10 @@ async def run(query: str) -> str:
                 # or currency_convert should not auto-complete a "search" goal
                 # just because they returned a value.
                 is_error = result_text.startswith("[") and "error" in result_text[:80].lower()
-                is_empty = "no results found" in result_text[:80].lower() or result_text.strip() == "(empty directory)"
+                is_empty = (
+                    "no results found" in result_text[:80].lower()
+                    or result_text.strip() in ("(empty directory)", "[]", "null", "")
+                )
                 if (not is_error and not is_empty
                         and _is_acquisition_goal(goal.text)
                         and tc.name in _AUTO_DONE_TOOLS):
@@ -286,7 +289,10 @@ async def run(query: str) -> str:
                         1 for h in history[-6:]
                         if h.get("kind") == "action"
                         and h.get("goal_id") == goal.id
-                        and "no results found" in h.get("result_descriptor", "").lower()
+                        and (
+                            "no results found" in h.get("result_descriptor", "").lower()
+                            or h.get("result_descriptor", "").strip() in ("[]", "null", "")
+                        )
                     )
                     if recent_empty >= 2:
                         print(f"  [no-search] 3+ empty results — skipping tool, forcing answer next iter")
@@ -326,7 +332,7 @@ async def run(query: str) -> str:
                         "goal_id": goal.id,
                         "tool": tc.name,
                         "arguments": tc.arguments,
-                        "result_descriptor": result_text[:300],
+                        "result_descriptor": result_text[:800],
                         "artifact_id": art_id,
                     }
                 )
