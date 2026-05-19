@@ -187,9 +187,24 @@ async def fetch_url(url: str) -> str:
 
 
 @mcp.tool()
-def get_time() -> str:
-    """Return the current UTC date and time in ISO 8601 format."""
-    return datetime.now(timezone.utc).isoformat()
+def get_time(tz: str = "UTC") -> str:
+    """Return the current date and time in the requested timezone.
+
+    Uses IANA timezone names. Common examples:
+      'UTC'            → 2026-05-19T07:02:33+00:00
+      'Asia/Tokyo'     → 2026-05-19T16:02:33+09:00
+      'America/New_York' → 2026-05-19T03:02:33-04:00
+      'Europe/London'  → 2026-05-19T08:02:33+01:00
+
+    Args:
+        tz: IANA timezone name (default 'UTC').
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    try:
+        zone = ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, KeyError):
+        zone = ZoneInfo("UTC")
+    return datetime.now(zone).isoformat()
 
 
 @mcp.tool()
