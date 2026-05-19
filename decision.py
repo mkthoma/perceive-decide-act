@@ -11,7 +11,7 @@ import re
 import llm_gateway as gw
 from schemas import DecisionOutput, Goal, MemoryItem, ToolCall
 
-_MAX_ARTIFACT_CHARS = 15_000  # ~3750 tokens; keeps intro/infobox of any page
+_MAX_ARTIFACT_CHARS = 50_000  # safety net only — source is already bounded by mcp_server._MAX_FETCH_CHARS
 
 # Matches vLLM / Groq-style text function call markup that some models emit
 # instead of native tool_calls:  <function(name){...}</function>
