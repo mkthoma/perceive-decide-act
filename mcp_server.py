@@ -225,7 +225,7 @@ def currency_convert(amount: float, from_currency: str, to_currency: str) -> str
     fc = from_currency.strip().upper()
     tc = to_currency.strip().upper()
     try:
-        with httpx.Client(timeout=10.0) as client:
+        with httpx.Client(timeout=10.0, follow_redirects=True) as client:
             resp = client.get(
                 "https://api.frankfurter.app/latest",
                 params={"from": fc, "to": tc, "amount": amount},

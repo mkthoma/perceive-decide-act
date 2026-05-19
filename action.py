@@ -29,9 +29,9 @@ async def execute(
     # Guard: reject artifact handles masquerading as real paths/URLs
     if _has_artifact_handle(tool_call):
         return (
-            f"[ERROR] '{tool_call.name}' received an artifact handle (art:...) "
-            "as a path or URL argument. Artifact content is injected via "
-            "ATTACHED ARTIFACTS — do not pass the handle directly to a tool.",
+            f"[STOP] Do NOT call '{tool_call.name}' with an art: handle. "
+            "The artifact bytes are already in ATTACHED ARTIFACTS above. "
+            "Read them and produce your answer now — call NO tool.",
             None,
         )
 
