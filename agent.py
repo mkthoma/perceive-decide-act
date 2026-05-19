@@ -270,7 +270,11 @@ async def run(query: str) -> str:
                 # Only fire for data-retrieval tools — utility tools like get_time
                 # or currency_convert should not auto-complete a "search" goal
                 # just because they returned a value.
-                is_error = result_text.startswith("[") and "error" in result_text[:80].lower()
+                is_error = result_text.startswith("[") and (
+                    "error" in result_text[:80].lower()
+                    or "timeout" in result_text[:80].lower()
+                    or result_text.startswith("[STOP]")
+                )
                 is_empty = (
                     "no results found" in result_text[:80].lower()
                     or result_text.strip() in ("(empty directory)", "[]", "null", "")

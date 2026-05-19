@@ -11,6 +11,8 @@ dependencies = [
     "python-dotenv>=1.0",
     "ddgs>=6.0",
     "tavily-python>=0.3",
+    "exa-py>=1.0",
+    "firecrawl-py>=1.0",
     "crawl4ai>=0.4",
     "tzdata>=2024.1",  # IANA timezone database for zoneinfo on Windows
 ]

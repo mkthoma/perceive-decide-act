@@ -5,9 +5,10 @@ Nine tools, stdio transport:
     web_search, fetch_url, get_time, currency_convert,
     read_file, list_dir, create_file, update_file, edit_file
 
-web_search:  Tavily primary, DuckDuckGo fallback. Hard-capped at 5 results.
+web_search:  Tavily → Exa → Firecrawl → DuckDuckGo fallback chain.
+             Hard-capped at 5 results.
 fetch_url:   crawl4ai only — clean markdown via headless Chromium.
-Usage for tavily and duckduckgo is logged to ./usage.json with monthly
+Usage for all search providers is logged to ./usage.json with monthly
 rollover and a soft cap of 950/1000 on Tavily.
 
 File tools are sandboxed under ./sandbox/. Run:  python mcp_server.py
@@ -53,6 +54,8 @@ def _empty_usage(month: str) -> dict:
     return {
         "month": month,
         "tavily": {"count": 0, "errors": 0},
+        "exa": {"count": 0, "errors": 0},
+        "firecrawl": {"count": 0, "errors": 0},
         "duckduckgo": {"count": 0, "errors": 0},
     }
 
@@ -67,7 +70,7 @@ def _load_usage() -> dict:
         return _empty_usage(month)
     if data.get("month") != month:
         return _empty_usage(month)
-    for k in ("tavily", "duckduckgo"):
+    for k in ("tavily", "exa", "firecrawl", "duckduckgo"):
         data.setdefault(k, {"count": 0, "errors": 0})
     return data
 
@@ -99,6 +102,42 @@ def _tavily_search(query: str, max_results: int) -> list[dict]:
             "snippet": r.get("content", ""),
         }
         for r in resp.get("results", [])
+    ]
+
+
+def _exa_search(query: str, max_results: int) -> list[dict]:
+    from exa_py import Exa
+
+    client = Exa(api_key=os.environ["EXA_API_KEY"])
+    # search() returns text contents by default in exa-py 2.x
+    resp = client.search(
+        query,
+        num_results=max_results,
+        contents={"text": {"max_characters": 500}},
+    )
+    return [
+        {
+            "title": r.title or "",
+            "url": r.url,
+            "snippet": (getattr(r, "text", None) or "")[:500],
+        }
+        for r in resp.results
+    ]
+
+
+def _firecrawl_search(query: str, max_results: int) -> list[dict]:
+    from firecrawl import V1FirecrawlApp
+
+    app = V1FirecrawlApp(api_key=os.environ["FIRECRAWL_API_KEY"])
+    resp = app.search(query, limit=max_results)
+    rows: list[dict] = resp.data if resp.success else []
+    return [
+        {
+            "title": r.get("title", ""),
+            "url": r.get("url", ""),
+            "snippet": (r.get("description", "") or r.get("markdown", ""))[:500],
+        }
+        for r in rows[:max_results]
     ]
 
 
@@ -160,8 +199,10 @@ async def _crawl4ai_fetch(url: str) -> dict:
 
 @mcp.tool()
 def web_search(query: str, max_results: int = 5) -> list[dict]:
-    """Search the web (Tavily primary, DDG fallback). Hard-capped at 5 results. Example: web_search("python asyncio tutorial", 3)."""
+    """Search the web. Provider chain: Tavily → Exa → Firecrawl → DuckDuckGo. Hard-capped at 5 results. Example: web_search("python asyncio tutorial", 3)."""
     max_results = max(1, min(max_results, MAX_SEARCH_RESULTS))
+
+    # 1. Tavily — best quality, paid (soft cap 950/mo)
     if os.environ.get("TAVILY_API_KEY") and _under_cap("tavily"):
         try:
             results = _tavily_search(query, max_results)
@@ -170,6 +211,28 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
                 return results
         except Exception:
             _bump("tavily", "errors")
+
+    # 2. Exa — neural search, paid (free tier 1 000/mo)
+    if os.environ.get("EXA_API_KEY"):
+        try:
+            results = _exa_search(query, max_results)
+            if results:
+                _bump("exa")
+                return results
+        except Exception:
+            _bump("exa", "errors")
+
+    # 3. Firecrawl — scraping-based search, paid (free tier 500 credits/mo)
+    if os.environ.get("FIRECRAWL_API_KEY"):
+        try:
+            results = _firecrawl_search(query, max_results)
+            if results:
+                _bump("firecrawl")
+                return results
+        except Exception:
+            _bump("firecrawl", "errors")
+
+    # 4. DuckDuckGo — free, no key, rate-limited; last resort
     results = _ddg_search(query, max_results)
     _bump("duckduckgo")
     return results
