@@ -51,6 +51,13 @@ _SYNTHESIS_KW = frozenset(
     "analyze analyse collate distil distill".split()
 )
 
+# First-word verbs that mean "go get the data" — goal is satisfied by a
+# successful tool call alone, no textual answer needed.
+# Exclude "check" (implies verify/report) and "find" (implies selection).
+_ACQUISITION_VERBS = frozenset(
+    "fetch download retrieve get load search look".split()
+)
+
 
 # --------------------------------------------------------------------------- #
 # Helpers                                                                       #
@@ -76,6 +83,19 @@ def _mcp_tools_for_decision(tools: list) -> list[dict]:
 def _is_synthesis_goal(text: str) -> bool:
     words = set(text.lower().split())
     return bool(words & _SYNTHESIS_KW)
+
+
+def _is_acquisition_goal(text: str) -> bool:
+    """True when a goal is satisfied purely by executing the tool call.
+
+    "Fetch the Wikipedia page" → done once fetch_url succeeds.
+    "Find the best activity based on weather" → NOT acquisition (contains
+    synthesis keywords), needs an ANSWER.
+    """
+    words = text.lower().split()
+    return bool(words) and words[0] in _ACQUISITION_VERBS and not (
+        _SYNTHESIS_KW & set(words)
+    )
 
 
 def _final_answer_from(history: list[dict], goals: list[Goal]) -> str:
@@ -161,6 +181,13 @@ async def run(query: str) -> str:
                     break
                 prior_goals = obs.goals
 
+                # Guard: Perception must never mark brand-new goals as done.
+                # Memory hits from prior runs can mislead Gemini into thinking
+                # the task is already complete before any work this run.
+                if it == 1:
+                    for g in prior_goals:
+                        g.done = False
+
                 print(f"\n--- iter {it} ---")
                 _print_goals(obs.goals)
 
@@ -180,17 +207,22 @@ async def run(query: str) -> str:
                     attached.append((goal.attach_artifact_id, raw))
                     print(f"  [attach] {goal.attach_artifact_id} ({len(raw):,} bytes)")
 
-                # Force-attach safety net: synthesis goals with no attachment
+                # Force-attach safety net: synthesis goals with no attachment.
+                # Only attach an artifact if its keywords overlap with the goal text
+                # so we don't accidentally attach an unrelated cached artifact.
                 if not attached and _is_synthesis_goal(goal.text):
+                    goal_words = set(goal.text.lower().split())
                     for hit in reversed(hits):
                         if hit.artifact_id and artifacts.exists(hit.artifact_id):
-                            raw = artifacts.get_bytes(hit.artifact_id)
-                            attached.append((hit.artifact_id, raw))
-                            print(
-                                f"  [force-attach] {hit.artifact_id} "
-                                f"({len(raw):,} bytes)"
-                            )
-                            break
+                            artifact_kw = set(getattr(hit, "keywords", []))
+                            if not artifact_kw or (goal_words & artifact_kw):
+                                raw = artifacts.get_bytes(hit.artifact_id)
+                                attached.append((hit.artifact_id, raw))
+                                print(
+                                    f"  [force-attach] {hit.artifact_id} "
+                                    f"({len(raw):,} bytes)"
+                                )
+                                break
 
                 # ── Decision ───────────────────────────────────────────── #
                 try:
@@ -226,6 +258,50 @@ async def run(query: str) -> str:
                 result_text, art_id = await action.execute(session, tc)
                 print(f"  [action] -> {result_text[:120]}")
 
+                # Auto-complete acquisition goals on successful tool execution.
+                # "Fetch the Wikipedia page" is done once fetch_url returns data;
+                # no LLM answer is needed. This prevents Decision from looping
+                # trying to re-read an artifact handle it can't use as a path.
+                is_error = result_text.startswith("[") and "error" in result_text[:80].lower()
+                is_empty = "no results found" in result_text[:80].lower() or result_text.strip() == "(empty directory)"
+                if not is_error and not is_empty and _is_acquisition_goal(goal.text):
+                    goal.done = True
+                    print(f"  [auto-done] acquisition goal satisfied by tool call")
+
+                # Hard-stop repeated empty searches: if the last 3 actions for
+                # this goal all returned "No results found", skip further tool
+                # calls and let Decision answer from its knowledge next iter.
+                if is_empty:
+                    recent_empty = sum(
+                        1 for h in history[-6:]
+                        if h.get("kind") == "action"
+                        and h.get("goal_id") == goal.id
+                        and "no results found" in h.get("result_descriptor", "").lower()
+                    )
+                    if recent_empty >= 2:
+                        print(f"  [no-search] 3+ empty results — skipping tool, forcing answer next iter")
+                        # Remove tools from mcp_tools for the NEXT decision call
+                        # by injecting a sentinel into history
+                        history.append(
+                            {
+                                "iter": it,
+                                "kind": "action",
+                                "goal_id": goal.id,
+                                "tool": tc.name,
+                                "arguments": tc.arguments,
+                                "result_descriptor": result_text[:300] + " [SEARCH_EXHAUSTED: answer from knowledge]",
+                                "artifact_id": None,
+                            }
+                        )
+                        memory.record_outcome(
+                            tool_call=tc,
+                            result_text=result_text,
+                            artifact_id=None,
+                            run_id=run_id,
+                            goal_id=goal.id,
+                        )
+                        continue
+
                 memory.record_outcome(
                     tool_call=tc,
                     result_text=result_text,
@@ -251,7 +327,31 @@ async def run(query: str) -> str:
     if fatal_error:
         sys.exit(1)
 
-    return _final_answer_from(history, prior_goals)
+    answer = _final_answer_from(history, prior_goals)
+
+    # If no answer was recorded at all (e.g. all goals auto-completed via tool
+    # calls but no ANSWER was produced), make one final Decision call to
+    # synthesise the answer from whatever is in memory + history.
+    if answer == "Task completed with no answer recorded." and not fatal_error:
+        try:
+            hits = memory.read(query, history)
+            synth_goal = Goal(text=query)
+            attached: list[tuple[str, bytes]] = []
+            for hit in reversed(hits):
+                if hit.artifact_id and artifacts.exists(hit.artifact_id):
+                    raw = artifacts.get_bytes(hit.artifact_id)
+                    attached.append((hit.artifact_id, raw))
+                    break
+            async with stdio_client(_MCP_PARAMS) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    out = await decision.next_step(synth_goal, hits, attached, history, [])
+            if out.is_answer and out.answer:
+                answer = out.answer
+        except Exception:
+            pass
+
+    return answer
 
 
 # --------------------------------------------------------------------------- #

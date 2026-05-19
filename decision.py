@@ -6,10 +6,16 @@ selects TINY or LARGE tier based on prompt size.
 """
 from __future__ import annotations
 
+import re
+
 import llm_gateway as gw
 from schemas import DecisionOutput, Goal, MemoryItem, ToolCall
 
 _MAX_ARTIFACT_CHARS = 80_000  # ~20k tokens; truncate larger artifacts
+
+# Matches vLLM / Groq-style text function call markup that some models emit
+# instead of native tool_calls:  <function(name){...}</function>
+_FC_RE = re.compile(r"<function\((\w+)\)\s*(\{.*?\})\s*</function>", re.DOTALL)
 
 _SYSTEM = """\
 You are DECISION, the action selector in an agentic loop.
@@ -22,10 +28,19 @@ STRICT RULES:
 - NEVER return both answer and tool_call in the same response.
 - Strings starting with "art:" are internal artifact handles. Do NOT pass them
   as path or url arguments to any tool. The artifact bytes are in ATTACHED ARTIFACTS.
+- If HISTORY contains a [STOP] line, the previous tool call was illegal.
+  Answer directly from ATTACHED ARTIFACTS — do NOT call any tool.
+- For real-time data (current time, live exchange rates, today's weather),
+  ALWAYS call the appropriate tool — never answer from memory or assumptions.
 - For extraction, list, comparison, recommendation, or synthesis goals: your answer
   must be substantive — at least 3 sentences or a numbered/bulleted list of ≥ 3 items.
-- If HISTORY already contains the information needed for this goal, answer directly
-  without calling a tool again.
+- If HISTORY already contains a tool result for this goal, answer from that result
+  directly — do not call the same tool again.
+- If HISTORY shows 3 or more consecutive web_search results with "No results found"
+  for the same goal, STOP searching. Answer from your own knowledge or note the
+  information is unavailable — never search the same topic a fourth time.
+- If HISTORY contains "[SEARCH_EXHAUSTED:" for this goal, do NOT call any tool.
+  Answer immediately from your knowledge, even if incomplete.
 - Pick the most specific tool for the task. Prefer fetch_url over web_search when
   you already have a URL."""
 
@@ -47,11 +62,11 @@ def _format_history(history: list[dict]) -> str:
         if kind == "action":
             entries.append(
                 f"  iter {h['iter']}: TOOL {h['tool']} → "
-                f"{h.get('result_descriptor', '')[:150]}"
+                f"{h.get('result_descriptor', '')[:300]}"
             )
         elif kind == "answer":
             entries.append(
-                f"  iter {h['iter']}: ANSWER: {h.get('text', '')[:150]}"
+                f"  iter {h['iter']}: ANSWER: {h.get('text', '')[:300]}"
             )
     return "\n".join(entries) if entries else "  (empty)"
 
@@ -114,4 +129,34 @@ async def next_step(
         )
 
     text = gw.extract_text(resp).strip()
+
+    # Some models (vLLM, Groq-style) emit tool calls as text markup instead of
+    # native tool_calls.  Detect and parse <function(name){...}</function>.
+    fc_match = _FC_RE.search(text)
+    if fc_match:
+        try:
+            import json as _json
+            fn_name = fc_match.group(1)
+            raw_args = fc_match.group(2)
+            args = _json.loads(raw_args)
+            # Coerce string integers to int for known numeric parameters
+            for key in ("max_results",):
+                if key in args and isinstance(args[key], str):
+                    try:
+                        args[key] = int(args[key])
+                    except ValueError:
+                        pass
+            return DecisionOutput(
+                tool_call=ToolCall(name=fn_name, arguments=args)
+            )
+        except Exception:
+            pass  # fall through to text answer
+
+    # Some LLMs prefix their response with the option label ("answer\n...").
+    # Strip it so it doesn't pollute the final answer shown to the user.
+    lower = text.lower()
+    if lower.startswith("answer"):
+        candidate = text[6:].lstrip(": \n")
+        if candidate:
+            text = candidate
     return DecisionOutput(answer=text or "Task completed.")

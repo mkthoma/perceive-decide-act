@@ -7,6 +7,7 @@ are reused exactly — the only thing removed is the FastAPI/HTTP/DB layer.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -221,79 +222,109 @@ async def chat(
 
     all_attempts: list[dict] = []
     last_err: str | None = None
+    initial_candidates = list(candidates)
 
-    for _ in range(len(candidates) + 1):
-        name, atts = router.pick(est, candidates, required_caps=required_caps)
-        all_attempts.extend(atts)
-        if name is None:
-            break
+    # Up to 3 rounds: each round tries all remaining candidates once,
+    # then waits for the shortest cooldown (≤10s) before the next round.
+    for _round in range(3):
+        for _ in range(len(candidates) + 1):
+            name, atts = router.pick(est, candidates, required_caps=required_caps)
+            all_attempts.extend(atts)
+            if name is None:
+                break
 
-        prov = router.providers[name]
-        router.state[name].record(0)
+            prov = router.providers[name]
+            router.state[name].record(0)
 
-        try:
-            result = await prov.chat(
-                messages,
-                max_tokens=2048,
-                temperature=temperature,
-                tools=tools,
-                tool_choice=tool_choice,
-                reasoning=reasoning,
-                response_format=response_format,
-                system_blocks=system_blocks,
-                cache_system=cache_system,
-            )
-        except P.ProviderError as e:
-            last_err = str(e)
-            secs = _backoff_secs(e)
-            if secs > 0:
-                router.state[name].mark_unavailable(secs, str(e)[:80])
-            all_attempts.append({"provider": name, "reason": f"failed: {str(e)[:100]}"})
-            candidates = [c for c in candidates if c != name]
-            continue
-        except Exception as e:
-            last_err = str(e)
-            all_attempts.append({"provider": name, "reason": f"exception: {str(e)[:100]}"})
-            candidates = [c for c in candidates if c != name]
-            continue
-
-        tokens = (result.get("input_tokens") or 0) + (result.get("output_tokens") or 0)
-        router.state[name].tokens_today += tokens
-        router.state[name].tokens_minute.append((time.time(), tokens))
-
-        # Normalize tool_calls — ensure arguments is always a dict
-        normalized: list[dict] = []
-        for tc in result.get("tool_calls") or []:
-            args = tc.get("arguments") or {}
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except Exception:
-                    args = {}
-            normalized.append({"id": tc.get("id", ""), "name": tc.get("name", ""), "arguments": args})
-
-        # Best-effort structured output validation
-        parsed: dict | None = None
-        if response_format and response_model and not normalized:
             try:
-                import jsonschema
-                obj = json.loads(result.get("text", ""))
-                schema = _strip_titles(response_model.model_json_schema())
-                jsonschema.Draft202012Validator(schema).validate(obj)
-                parsed = obj
-            except Exception:
-                pass
+                result = await prov.chat(
+                    messages,
+                    max_tokens=2048,
+                    temperature=temperature,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    reasoning=reasoning,
+                    response_format=response_format,
+                    system_blocks=system_blocks,
+                    cache_system=cache_system,
+                )
+            except P.ProviderError as e:
+                last_err = str(e)
+                secs = _backoff_secs(e)
+                if secs > 0:
+                    router.state[name].mark_unavailable(secs, str(e)[:80])
+                all_attempts.append({"provider": name, "reason": f"failed: {str(e)[:100]}"})
+                candidates = [c for c in candidates if c != name]
+                continue
+            except Exception as e:
+                last_err = str(e)
+                all_attempts.append({"provider": name, "reason": f"exception: {str(e)[:100]}"})
+                candidates = [c for c in candidates if c != name]
+                continue
 
-        return {
-            "provider": name,
-            "model": result.get("model", name),
-            "text": result.get("text", ""),
-            "tool_calls": normalized,
-            "stop_reason": result.get("stop_reason", "end_turn"),
-            "input_tokens": result.get("input_tokens", 0),
-            "output_tokens": result.get("output_tokens", 0),
-            "parsed": parsed,
-        }
+            tokens = (result.get("input_tokens") or 0) + (result.get("output_tokens") or 0)
+            router.state[name].tokens_today += tokens
+            router.state[name].tokens_minute.append((time.time(), tokens))
+
+            # Normalize tool_calls — ensure arguments is always a dict
+            normalized: list[dict] = []
+            for tc in result.get("tool_calls") or []:
+                args = tc.get("arguments") or {}
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except Exception:
+                        args = {}
+                normalized.append({"id": tc.get("id", ""), "name": tc.get("name", ""), "arguments": args})
+
+            # Best-effort structured output validation
+            parsed: dict | None = None
+            if response_format and response_model and not normalized:
+                try:
+                    import jsonschema
+                    obj = json.loads(result.get("text", ""))
+                    schema = _strip_titles(response_model.model_json_schema())
+                    jsonschema.Draft202012Validator(schema).validate(obj)
+                    parsed = obj
+                except Exception:
+                    pass
+
+            return {
+                "provider": name,
+                "model": result.get("model", name),
+                "text": result.get("text", ""),
+                "tool_calls": normalized,
+                "stop_reason": result.get("stop_reason", "end_turn"),
+                "input_tokens": result.get("input_tokens", 0),
+                "output_tokens": result.get("output_tokens", 0),
+                "parsed": parsed,
+            }
+
+        # All candidates tried — find shortest cooldown across initial set
+        # (not just the pruned list) to give permanently-failed providers a
+        # fresh chance on the next round.
+        now = time.time()
+        min_wait: float | None = None
+        for cname in initial_candidates:
+            prov_c = router.providers.get(cname)
+            if prov_c is None:
+                continue
+            caps_c = getattr(prov_c, "capabilities", {})
+            if required_caps and any(not caps_c.get(c) for c in required_caps):
+                continue
+            state_c = router.state[cname]
+            if state_c.unavailable_until > now:
+                continue  # hard backoff — skip
+            wait_c = LIMITS.get(cname, {}).get("cooldown", 0) - (now - state_c.last_call)
+            if 0 < wait_c <= 10 and (min_wait is None or wait_c < min_wait):
+                min_wait = wait_c
+
+        if min_wait is None:
+            break  # nothing worth waiting for
+
+        await asyncio.sleep(min_wait + 0.2)
+        # Restore initial candidate list so permanently-soft-failed providers retry
+        candidates = list(initial_candidates)
 
     raise RuntimeError(
         f"All providers unavailable. Attempts: {all_attempts}. Last error: {last_err}\n"
