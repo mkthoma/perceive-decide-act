@@ -452,15 +452,47 @@ async def run(query: str) -> str:
                                 print(f"  [context-attach] {art_id} ({len(raw):,} bytes)")
                                 break
 
+                    # Self-attach: covers single-goal mode where Perception returns
+                    # the full query as one goal (no separate "fetch" goal to trigger
+                    # context-attach).  If this goal has already executed a tool that
+                    # produced an artifact in a prior iteration, attach it now so
+                    # Decision can synthesize from it without calling a tool again.
+                    if not attached:
+                        for h in history:
+                            if h.get("goal_id") == goal.id and h.get("artifact_id"):
+                                art_id = h["artifact_id"]
+                                if artifacts.exists(art_id):
+                                    raw = artifacts.get_bytes(art_id)
+                                    attached.append((art_id, raw))
+                                    print(f"  [self-attach] {art_id} ({len(raw):,} bytes)")
+                                    break
+
                     # ── Decision ───────────────────────────────────────────── #
                     try:
                         out = await decision.next_step(
                             goal, hits, attached, history, mcp_tools
                         )
                     except Exception as exc:
-                        print(f"\n[agent] ERROR in decision: {exc}")
-                        fatal_error = str(exc)
-                        break
+                        err_str = str(exc)
+                        if "All providers unavailable" not in err_str:
+                            print(f"\n[agent] ERROR in decision: {exc}")
+                            fatal_error = err_str
+                            break
+                        # All tool-capable providers are rate-limited or unavailable.
+                        # Retry without tools so text-only endpoints (e.g. OpenRouter)
+                        # can still produce an answer from attached artifacts or history.
+                        print(
+                            f"\n[agent] All providers failed (rate limits) — "
+                            "retrying Decision without tools"
+                        )
+                        try:
+                            out = await decision.next_step(
+                                goal, hits, attached, history, []
+                            )
+                        except Exception as exc2:
+                            print(f"\n[agent] ERROR in decision (no-tools fallback): {exc2}")
+                            fatal_error = str(exc2)
+                            break
 
                     if out.is_answer:
                         answer_text = (out.answer or "").strip()
