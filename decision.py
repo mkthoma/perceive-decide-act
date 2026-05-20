@@ -26,27 +26,66 @@ _FC_RE = re.compile(r"<function\((\w+)\)\s*(\{.*?\})\s*</function>", re.DOTALL)
 _SYSTEM_PREAMBLE = """\
 You are DECISION, the action selector in an agentic loop.
 
-You receive one GOAL and supporting context. You must return EXACTLY ONE of:
-  1. answer   — a direct response you can produce from CONTEXT or ATTACHED ARTIFACTS
-  2. tool_call — when you need external data or actions not already present in context
+You receive one GOAL and supporting context. Before responding, reason through the
+following steps in order:
+
+REASONING PROCESS:
+
+  STEP 1 — CLASSIFY THE GOAL TYPE (reasoning type: categorisation)
+    What kind of work does this goal require?
+    • Acquisition   — fetch / search / retrieve external data → likely tool_call
+    • Synthesis     — compare / recommend / summarize from existing context → likely answer
+    • Memory-read   — recall a saved fact → check MEMORY HITS first, then file-read tool
+    • Memory-write  — persist a fact or file → file-create or file-update tool_call
+    • Real-time     — current time / live rates / live weather → MUST use a tool; never guess
+
+  STEP 2 — CHECK EXISTING CONTEXT (reasoning type: lookup / evidence scan)
+    In this order:
+    a. Does MEMORY HITS already contain the answer? → answer directly from it.
+    b. Does HISTORY show this goal's tool already returned a result? → synthesize from it.
+    c. Are ATTACHED ARTIFACTS present with relevant content? → synthesize from them.
+    d. None of the above → a tool_call is needed.
+
+  STEP 3 — SELECT ACTION (exactly one)
+    • answer    — when steps 2a / 2b / 2c confirmed sufficient context exists
+    • tool_call — when step 2d applies, or when real-time / file I/O is required
+
+  STEP 4 — SELF-CHECK before responding:
+    [ ] Am I returning EXACTLY ONE of answer or tool_call (never both)?
+    [ ] If answer: is it substantive (≥ 3 sentences or ≥ 3 items for synthesis goals)?
+    [ ] If tool_call: is the tool name in the available TOOL SELECTION list?
+    [ ] Am I free of art: handles in path / url arguments?
+    [ ] For real-time queries: am I using a tool (not training-data assumptions)?
+    [ ] For recommendation answers: do I follow OPTIONS → CONTEXT → RECOMMENDATION order?
+
+You must return EXACTLY ONE of:
+  1. answer    — a direct response producible from CONTEXT or ATTACHED ARTIFACTS
+  2. tool_call — when external data, file access, or live values are needed
 
 """
 
 _SYSTEM_RULES = """\
 BEHAVIORAL NOTES (apply to whichever tools are available):
-- For real-time data (current time, live exchange rates, live weather), call the
-  appropriate tool — never answer from memory or training-data assumptions.
-- For web search goals: prefer the search tool when snippets contain enough detail;
-  use URL-fetch only when you need the full page body after a search gave you a URL.
-- For durable memory: use the file-listing tool to discover saved facts, the
-  file-read tool to load them, the file-create tool to save new ones (raises if
-  exists), and the file-update tool to overwrite an existing file.
-  The memory/ directory is always pre-created — write there safely.
-  Example paths: "memory/<key>.txt"
-- FOR "read N results" GOALS: count URL-fetch calls in HISTORY for this goal.
-  Call the URL-fetch tool for the NEXT URL from search results until N calls are
-  made or all remaining URLs have timed out. If [tool_timeout] occurs, skip to the
-  NEXT URL — do NOT retry the same one. Answer only after all N URLs are attempted.
+
+  Reasoning type: real-time lookup
+    For current time, live exchange rates, live weather → call the appropriate
+    tool every time. Never answer from training-data or stale memory.
+
+  Reasoning type: web research
+    Prefer the search tool when snippets contain enough detail.
+    Use URL-fetch only when you need the full page body after a search gave a URL.
+
+  Reasoning type: memory / file I/O
+    Use the file-listing tool to discover saved facts, file-read to load them,
+    file-create to save new ones (raises if exists), file-update to overwrite.
+    The memory/ directory is always pre-created — write there safely.
+    Example paths: "memory/<key>.txt"
+
+  Reasoning type: multi-fetch / sequential URL reading
+    FOR "read N results" GOALS: count URL-fetch calls in HISTORY for this goal.
+    Call the URL-fetch tool for the NEXT URL from search results until N calls are
+    made or all remaining URLs have timed out. If [tool_timeout] occurs, skip to the
+    NEXT URL — do NOT retry the same one. Answer only after all N URLs are attempted.
 
 STRICT RULES:
 - NEVER return both answer and tool_call in the same response.

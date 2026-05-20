@@ -52,24 +52,63 @@ class _Classification(BaseModel):
 
 
 _CLASSIFY_SYSTEM = """\
-Classify the user's text as one of the memory kinds:
-  fact        — an objective statement about the world or a person
-  preference  — a user preference, like, dislike, or style choice
-  tool_outcome — result of a tool execution (rarely used here)
-  scratchpad  — working note, temporary, run-scoped
+You are MEMORY CLASSIFIER. Your job is to read a piece of text and produce a
+structured memory record for an agentic system.
 
-Return JSON matching this schema:
-{
-  "kind": "fact" | "preference" | "tool_outcome" | "scratchpad",
-  "keywords": [list of 3-10 lowercase keyword strings for search],
-  "descriptor": "one short human-readable line summarizing the item",
-  "value": { structured payload relevant to the kind }
-}
+REASONING PROCESS — work through each step before writing output:
 
-For a fact: value = {"entity": ..., "attribute": ..., "value": ...}
-For a preference: value = {"topic": ..., "preference": ...}
-For scratchpad: value = {"text": <original text>}
-Return ONLY valid JSON, no prose."""
+  STEP 1 — IDENTIFY THE REASONING TYPE
+    Ask: what kind of reasoning does this classification require?
+    • Lookup/recognition  → matching text to a known category definition
+    • Entity extraction   → pulling out a named subject + attribute + value
+    • Preference parsing  → detecting subjective like/dislike language
+    • Fallback            → text is ambiguous or mixed → use "scratchpad"
+    Name the reasoning type in your head before proceeding.
+
+  STEP 2 — CHOOSE THE KIND
+    Read the input and decide which category fits best:
+    • fact         — verifiable, objective statement about a person, place, or event
+    • preference   — user preference, like, dislike, or style choice ("I prefer…", "I like…")
+    • tool_outcome — direct result of a tool execution (rarely used; default to fact/scratchpad)
+    • scratchpad   — working note, ambiguous, or run-scoped temporary text
+
+  STEP 3 — EXTRACT KEYWORDS (3-10 lowercase tokens)
+    Pick the most distinctive nouns, names, dates, and domain terms.
+    Avoid stopwords ("the", "a", "is", "was").
+
+  STEP 4 — WRITE DESCRIPTOR AND VALUE
+    • descriptor: one line, ≤15 words, human-readable summary.
+    • value: use the schema for the chosen kind (see VALUE SCHEMAS below).
+
+  STEP 5 — SELF-CHECK before outputting:
+    [ ] Does "kind" exactly match one of the four defined values?
+    [ ] Are keywords specific enough to retrieve this record later by keyword search?
+    [ ] Is the descriptor ≤ 15 words and free of JSON syntax?
+    [ ] Does the value follow the correct schema for the chosen kind?
+    [ ] Is the output ONLY a JSON object — no prose before or after?
+
+VALUE SCHEMAS:
+  fact:         {"entity": "<subject>",   "attribute": "<aspect>",   "value": "<the fact>"}
+  preference:   {"topic":  "<domain>",    "preference": "<what the user prefers>"}
+  tool_outcome: {"tool":   "<tool name>", "result": "<outcome summary>"}
+  scratchpad:   {"text":   "<original text verbatim>"}
+
+EXAMPLES:
+  Input: "Claude Shannon was born on April 30, 1916 in Michigan."
+  Reasoning: verifiable fact about a person → kind=fact, entity extraction.
+  Output: {"kind":"fact","keywords":["claude","shannon","born","1916","april","michigan"],"descriptor":"Claude Shannon birth date and birthplace","value":{"entity":"Claude Shannon","attribute":"birth_date_and_place","value":"April 30, 1916, Michigan"}}
+
+  Input: "I always prefer dark mode in my code editors."
+  Reasoning: subjective user preference → kind=preference, preference parsing.
+  Output: {"kind":"preference","keywords":["dark","mode","code","editor","ui"],"descriptor":"User prefers dark mode in code editors","value":{"topic":"code editor UI","preference":"dark mode"}}
+
+ERROR HANDLING:
+  - Unsure between "fact" and "scratchpad"? Choose "fact" when the statement contains a verifiable entity+attribute+value triple; otherwise "scratchpad".
+  - Unsure between "preference" and "fact"? "Preference" if first-person and subjective; "fact" if third-person and verifiable.
+  - Keywords hard to find? Use the most distinctive nouns from the text, even if only 3.
+  - If the text is very short (< 5 words), use "scratchpad" and set keywords to individual words.
+
+Return ONLY valid JSON matching the schema. No prose, no explanation, no markdown fences."""
 
 
 # --------------------------------------------------------------------------- #
