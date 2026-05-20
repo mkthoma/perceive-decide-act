@@ -366,6 +366,9 @@ async def run(query: str) -> str:
                                 "determine", "recommend", "compare", "select",
                                 "choose", "most appropriate", "which is best",
                                 "based on",
+                                # Cross-source aggregation — requires reading all sources
+                                "agree", "agreed", "common", "consensus",
+                                "sources", "across",
                             )
                         )
                         if _prior_run_answers and not _is_integrating:
@@ -463,6 +466,30 @@ async def run(query: str) -> str:
                         answer_text = (out.answer or "").strip()
                         preview = answer_text[:200]
                         print(f"  [decision] ANSWER: {preview}{'...' if len(answer_text) > 200 else ''}")
+
+                        # Guard: some models emit Llama-style <|...|> tool call markup
+                        # as plain text when decision.py's Llama parser couldn't match
+                        # a known tool.  Treat it as a non-answer and force the model
+                        # to synthesize directly from ATTACHED ARTIFACTS on retry.
+                        if "<|tool_calls_section_begin|>" in answer_text or "<|tool_call_begin|>" in answer_text:
+                            print("  [decision] Llama-format tool call in answer — injecting STOP hint")
+                            history.append(
+                                {
+                                    "iter": it,
+                                    "kind": "action",
+                                    "goal_id": goal.id,
+                                    "tool": "SYSTEM",
+                                    "arguments": {},
+                                    "result_descriptor": (
+                                        "[STOP] Response contained Llama-format <|...|> tool call "
+                                        "markup as plain text instead of a native tool_call. "
+                                        "Answer directly from ATTACHED ARTIFACTS — do NOT call any tool."
+                                    ),
+                                    "artifact_id": None,
+                                }
+                            )
+                            it += 1
+                            continue
 
                         # Guard: some models emit __NO_ANSWER__ instead of extracting
                         # data from attached artifacts.  Inject a STOP hint and retry.

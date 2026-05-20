@@ -21,6 +21,18 @@ _FC_RE = re.compile(r"<function\((\w+)\)\s*(\{.*?\})\s*</function>", re.DOTALL)
 # when they output the call as a string instead of a native tool_call object.
 _TC_TEXT_RE = re.compile(r"tool_call\s*:?\s*(\w+)\(", re.IGNORECASE)
 
+# Matches Llama 3.1/3.2-style function call markup emitted as plain text:
+#   <|tool_calls_section_begin|><|tool_call_begin|>functions.<id_or_name>
+#   <|tool_call_argument_begin|>{...}<|tool_call_end|>
+# The identifier after "functions." is often a tool-use ID (toolu_...) rather
+# than the real tool name; we infer the correct name from arg keys below.
+_LLAMA_FC_RE = re.compile(
+    r"<\|tool_calls_section_begin\|>.*?<\|tool_call_begin\|>"
+    r"functions\.\w+<\|tool_call_argument_begin\|>(\{.*?\})"
+    r"<\|tool_call_end\|>",
+    re.DOTALL,
+)
+
 # ------------------------------------------------------------------------------- #
 # System prompt — split into preamble + dynamic tool guide + rules               #
 # The TOOL SELECTION section is built at call time from the live MCP schema so  #
@@ -361,6 +373,31 @@ async def next_step(
             return DecisionOutput(
                 tool_call=ToolCall(name=fn_name, arguments=args)
             )
+
+    # Detect Llama 3.1/3.2-style tool call markup emitted as plain text.
+    # The "function name" field is often a tool-use ID (toolu_...) rather than
+    # the real tool name, so we infer it by matching arg keys against the live
+    # MCP tool schemas: the tool whose required params are a subset of the
+    # provided args is the intended tool.
+    llama_m = _LLAMA_FC_RE.search(text)
+    if llama_m:
+        try:
+            import json as _json3
+            args = _json3.loads(llama_m.group(1))
+            if isinstance(args, dict):
+                fn_name: str | None = None
+                for _tool in mcp_tools:
+                    _schema = (_tool.get("input_schema") or {})
+                    _required = set(_schema.get("required") or [])
+                    if _required and _required <= set(args.keys()):
+                        fn_name = _tool["name"]
+                        break
+                if fn_name:
+                    return DecisionOutput(
+                        tool_call=ToolCall(name=fn_name, arguments=args)
+                    )
+        except Exception:
+            pass  # fall through to text answer
 
     # Some LLMs prefix their response with the option label ("answer\n...").
     # Strip it so it doesn't pollute the final answer shown to the user.
