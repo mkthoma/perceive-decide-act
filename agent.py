@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 import uuid
 
@@ -44,11 +45,28 @@ _MCP_PARAMS = StdioServerParameters(
     args=["run", "python", "mcp_server.py"],
 )
 
+# Pre-create sandbox sub-directories that create_file requires to exist.
+# mcp_server.create_file raises ValueError if the parent dir is missing,
+# so we ensure memory/ is always present before any agent run.
+_SANDBOX_DIRS = ["sandbox/memory"]
+
+def _ensure_sandbox_dirs() -> None:
+    """Create required sandbox sub-directories if they don't exist yet."""
+    import os as _os
+    base = _os.path.dirname(_os.path.abspath(__file__))
+    for d in _SANDBOX_DIRS:
+        _os.makedirs(_os.path.join(base, d), exist_ok=True)
+
 # Keywords that signal a synthesis / extraction goal → force-attach safety net
 _SYNTHESIS_KW = frozenset(
-    "synthesize synthesise extract compare decide summarize summarise "
+    "synthesize synthesise compare decide summarize summarise "
     "recommend choose select appropriate agree common findings "
     "analyze analyse collate distil distill".split()
+)
+
+# Words that signal the user wants to persist a fact durably to disk.
+_MEMORY_WRITE_KW = frozenset(
+    "remember save store persist record note keep memorize memorise".split()
 )
 
 # First-word verbs that mean "go get the data" — goal is satisfied by a
@@ -115,20 +133,37 @@ def _is_acquisition_goal(text: str) -> bool:
     )
 
 
+def _has_memory_write_intent(query: str) -> bool:
+    """True when the query asks to persist a fact to durable storage."""
+    words = set(query.lower().split())
+    return bool(words & _MEMORY_WRITE_KW)
+
+
+def _has_memory_write_goal(goals: list[Goal]) -> bool:
+    """True when at least one goal is a durable memory-write step."""
+    for g in goals:
+        lower = g.text.lower()
+        if any(kw in lower for kw in ("memory/", "create_file", "save", "store", "persist", "record")):
+            return True
+    return False
+
+
 def _final_answer_from(history: list[dict], goals: list[Goal]) -> str:
     """Build the final answer from history.
 
-    When multiple goals each produced an answer, join them in goal order so
-    every sub-question is represented in the output (e.g. birth date AND
-    contributions, not just whichever was answered last).
+    Preference order:
+    1. If a synthesis / extraction goal produced an answer, return only that
+       (sub-goal answers are intermediate steps, not the final reply).
+    2. If multiple non-synthesis goals produced answers, join them in goal order.
+    3. Fall back to the last action descriptor if no answer was recorded.
     """
     # Collect the last answer for each goal_id (later entries overwrite earlier).
-    # Skip __NO_ANSWER__ sentinels — they are retry hints, not real answers.
+    # Skip __NO_ANSWER__ sentinels — they are model placeholders, not real answers.
     answer_by_goal: dict[str, str] = {}
     for h in history:
         if h.get("kind") == "answer" and h.get("text"):
             text = h["text"]
-            if text.strip() == "__NO_ANSWER__":
+            if "__NO_ANSWER__" in text:
                 continue
             gid = h.get("goal_id", "")
             answer_by_goal[gid] = text
@@ -142,7 +177,46 @@ def _final_answer_from(history: list[dict], goals: list[Goal]) -> str:
     if len(answer_by_goal) == 1:
         return next(iter(answer_by_goal.values()))
 
-    # Multiple goals — return answers in goal order, one paragraph per goal
+    # Multiple goals answered.
+    # Only the LAST answered goal in goal-list order can act as a synthesis gate.
+    # An intermediate "Extract birth date" goal must NOT suppress a later answer
+    # (e.g. "Identify three contributions") even if its text has a synthesis keyword.
+    last_answered_goal: Goal | None = None
+    for g in reversed(goals):
+        if g.id in answer_by_goal:
+            last_answered_goal = g
+            break
+
+    if last_answered_goal and _is_synthesis_goal(last_answered_goal.text):
+        # Final goal is a true integration step.  Return its answer alone IF it
+        # looks self-contained — i.e. it lists at least as many numbered items
+        # as there were prior answered goals feeding into it.
+        synth_text = answer_by_goal[last_answered_goal.id]
+
+        # Count numbered items in the synthesis answer (1. / 2. / 3. pattern)
+        _numbered = len(re.findall(r"(?m)^\s*\d+\.", synth_text))
+        # Count prior non-synthesis answered goals (the "options" that should be listed)
+        _prior_count = sum(
+            1 for g in goals
+            if g.id in answer_by_goal
+            and g.id != last_answered_goal.id
+            and not _is_synthesis_goal(g.text)
+        )
+
+        # If the synthesis answer has fewer numbered items than prior data goals,
+        # it dropped some options — prepend the prior answers so nothing is lost.
+        if _prior_count >= 1 and _numbered < _prior_count:
+            prior_answers = [
+                answer_by_goal[g.id]
+                for g in goals
+                if g.id in answer_by_goal and g.id != last_answered_goal.id
+            ]
+            if prior_answers:
+                return "\n\n".join(prior_answers) + "\n\n" + synth_text
+        return synth_text
+
+    # No integrating final goal — join all answers in goal order.
+    # Use double newline (not ---) so the output reads as one cohesive response.
     ordered: list[str] = []
     seen: set[str] = set()
     for g in goals:
@@ -154,7 +228,7 @@ def _final_answer_from(history: list[dict], goals: list[Goal]) -> str:
         if gid not in seen:
             ordered.append(ans)
 
-    return "\n\n---\n\n".join(ordered)
+    return "\n\n".join(ordered)
 
 
 def _print_goals(goals: list[Goal]) -> None:
@@ -169,6 +243,8 @@ def _print_goals(goals: list[Goal]) -> None:
 # --------------------------------------------------------------------------- #
 
 async def run(query: str) -> str:
+    _ensure_sandbox_dirs()   # guarantee memory/ exists before create_file is called
+
     run_id = uuid.uuid4().hex[:8]
     history: list[dict] = []
     prior_goals: list[Goal] = []
@@ -219,6 +295,24 @@ async def run(query: str) -> str:
                     # the task is already complete before any work this run.
                     for g in prior_goals:
                         g.done = False
+
+                    # Safety net: if the query has memory-write intent but
+                    # Perception produced no durable-save goal, inject one at
+                    # the front so the fact is persisted via create_file.
+                    if (
+                        _has_memory_write_intent(query)
+                        and not _has_memory_write_goal(prior_goals)
+                    ):
+                        # Use the first sentence of the query as the fact
+                        # descriptor (strip trailing filler phrases).
+                        _fact = query.split(".")[0].strip()
+                        save_goal = Goal(
+                            id=uuid.uuid4().hex[:8],
+                            text=f"Save fact to memory/ with create_file: {_fact}",
+                            done=False,
+                        )
+                        prior_goals.insert(0, save_goal)
+                        print(f"  [agent] injected memory-write goal: {save_goal.text}")
                 else:
                     # Reuse prior_goals directly — no LLM call needed.
                     obs = Observation(goals=list(prior_goals))
@@ -244,7 +338,8 @@ async def run(query: str) -> str:
 
                 # For synthesis goals attach ALL artifacts collected this run
                 # (up to 3) so Decision has every piece of data it needs in one
-                # call.  Only uses current-run history — never stale memory hits.
+                # call.  Falls back to keyword-filtered memory hits if the run
+                # has produced no artifacts yet.
                 if not attached and _is_synthesis_goal(goal.text):
                     seen: set[str] = set()
                     for h in history:
@@ -256,21 +351,43 @@ async def run(query: str) -> str:
                             print(f"  [force-attach] {art_id} ({len(raw):,} bytes)")
                             if len(attached) >= 3:
                                 break
+                    # Fallback: keyword-filtered memory hits
+                    if not attached:
+                        goal_words = set(goal.text.lower().split())
+                        for hit in reversed(hits):
+                            if hit.artifact_id and artifacts.exists(hit.artifact_id):
+                                artifact_kw = set(getattr(hit, "keywords", []))
+                                if not artifact_kw or (goal_words & artifact_kw):
+                                    raw = artifacts.get_bytes(hit.artifact_id)
+                                    attached.append((hit.artifact_id, raw))
+                                    print(
+                                        f"  [force-attach] {hit.artifact_id} "
+                                        f"({len(raw):,} bytes)"
+                                    )
+                                    break
 
-                # Goal-artifact auto-attach: if this specific goal produced an
-                # artifact in a prior iteration (e.g. fetch → extract pattern),
-                # attach it now so Decision has the bytes without re-fetching.
-                # Covers the case where Perception only ran on iter 1 and never
-                # had a chance to set attach_artifact_id on later iterations.
-                if not attached:
-                    for h in reversed(history):
-                        if h.get("goal_id") == goal.id and h.get("artifact_id"):
-                            art_id = h["artifact_id"]
-                            if artifacts.exists(art_id):
-                                raw = artifacts.get_bytes(art_id)
-                                attached.append((art_id, raw))
-                                print(f"  [goal-attach] {art_id} ({len(raw):,} bytes)")
-                                break
+                # For non-synthesis goals that follow an acquisition goal (e.g.
+                # "Extract birth date from the fetched content"), attach the most
+                # recent run artifact so Decision can answer without calling
+                # read_file on an art: handle.  Only fires when no artifact has
+                # been attached yet and there IS a completed acquisition goal in
+                # this run that produced an artifact.
+                if (
+                    not attached
+                    and not _is_acquisition_goal(goal.text)
+                    and any(
+                        _is_acquisition_goal(g.text) and g.done
+                        for g in prior_goals
+                        if g.id != goal.id
+                    )
+                ):
+                    for h in history:
+                        art_id = h.get("artifact_id")
+                        if art_id and artifacts.exists(art_id):
+                            raw = artifacts.get_bytes(art_id)
+                            attached.append((art_id, raw))
+                            print(f"  [context-attach] {art_id} ({len(raw):,} bytes)")
+                            break
 
                 # ── Decision ───────────────────────────────────────────── #
                 try:
@@ -284,11 +401,12 @@ async def run(query: str) -> str:
 
                 if out.is_answer:
                     answer_text = (out.answer or "").strip()
-                    # Guard: some models emit "__NO_ANSWER__" as a sentinel when
-                    # they see an attached artifact but don't know they should
-                    # synthesize from it.  Inject a [STOP] hint so the next
-                    # iteration forces the model to answer from the artifact.
-                    if answer_text == "__NO_ANSWER__":
+                    preview = answer_text[:200]
+                    print(f"  [decision] ANSWER: {preview}{'...' if len(answer_text) > 200 else ''}")
+
+                    # Guard: some models emit __NO_ANSWER__ instead of extracting
+                    # data from attached artifacts.  Inject a STOP hint and retry.
+                    if "__NO_ANSWER__" in answer_text:
                         print(f"  [decision] no-answer sentinel — injecting STOP hint")
                         history.append(
                             {
@@ -306,9 +424,8 @@ async def run(query: str) -> str:
                                 "artifact_id": None,
                             }
                         )
-                        continue  # don't mark done; retry with the STOP hint visible
-                    preview = answer_text[:200]
-                    print(f"  [decision] ANSWER: {preview}{'...' if len(answer_text) > 200 else ''}")
+                        continue
+
                     history.append(
                         {
                             "iter": it,
@@ -423,7 +540,7 @@ async def run(query: str) -> str:
     _no_real_answer = (
         answer == "Task completed with no answer recorded."
         or answer.startswith("Task completed. Last action:")
-        or answer.strip() == "__NO_ANSWER__"
+        or "__NO_ANSWER__" in answer
     )
     if _no_real_answer and not fatal_error:
         try:

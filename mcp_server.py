@@ -5,10 +5,9 @@ Nine tools, stdio transport:
     web_search, fetch_url, get_time, currency_convert,
     read_file, list_dir, create_file, update_file, edit_file
 
-web_search:  Tavily → Exa → Firecrawl → DuckDuckGo fallback chain.
-             Hard-capped at 5 results.
-fetch_url:   httpx fast-path (plain HTTP, ~3 s) → crawl4ai fallback for JS-heavy pages.
-Usage for all search providers is logged to ./usage.json with monthly
+web_search:  Tavily primary, DuckDuckGo fallback. Hard-capped at 5 results.
+fetch_url:   crawl4ai only — clean markdown via headless Chromium.
+Usage for tavily and duckduckgo is logged to ./usage.json with monthly
 rollover and a soft cap of 950/1000 on Tavily.
 
 File tools are sandboxed under ./sandbox/. Run:  python mcp_server.py
@@ -16,7 +15,6 @@ File tools are sandboxed under ./sandbox/. Run:  python mcp_server.py
 
 from __future__ import annotations
 
-import html.parser as _html_parser
 import json
 import os
 import threading
@@ -55,8 +53,6 @@ def _empty_usage(month: str) -> dict:
     return {
         "month": month,
         "tavily": {"count": 0, "errors": 0},
-        "exa": {"count": 0, "errors": 0},
-        "firecrawl": {"count": 0, "errors": 0},
         "duckduckgo": {"count": 0, "errors": 0},
     }
 
@@ -71,7 +67,7 @@ def _load_usage() -> dict:
         return _empty_usage(month)
     if data.get("month") != month:
         return _empty_usage(month)
-    for k in ("tavily", "exa", "firecrawl", "duckduckgo"):
+    for k in ("tavily", "duckduckgo"):
         data.setdefault(k, {"count": 0, "errors": 0})
     return data
 
@@ -106,42 +102,6 @@ def _tavily_search(query: str, max_results: int) -> list[dict]:
     ]
 
 
-def _exa_search(query: str, max_results: int) -> list[dict]:
-    from exa_py import Exa
-
-    client = Exa(api_key=os.environ["EXA_API_KEY"])
-    # search() returns text contents by default in exa-py 2.x
-    resp = client.search(
-        query,
-        num_results=max_results,
-        contents={"text": {"max_characters": 500}},
-    )
-    return [
-        {
-            "title": r.title or "",
-            "url": r.url,
-            "snippet": (getattr(r, "text", None) or "")[:500],
-        }
-        for r in resp.results
-    ]
-
-
-def _firecrawl_search(query: str, max_results: int) -> list[dict]:
-    from firecrawl import V1FirecrawlApp
-
-    app = V1FirecrawlApp(api_key=os.environ["FIRECRAWL_API_KEY"])
-    resp = app.search(query, limit=max_results)
-    rows: list[dict] = resp.data if resp.success else []
-    return [
-        {
-            "title": r.get("title", ""),
-            "url": r.get("url", ""),
-            "snippet": (r.get("description", "") or r.get("markdown", ""))[:500],
-        }
-        for r in rows[:max_results]
-    ]
-
-
 def _ddg_search(query: str, max_results: int) -> list[dict]:
     hits: list[dict] = []
     with DDGS() as ddgs:
@@ -160,84 +120,6 @@ def _ddg_search(query: str, max_results: int) -> list[dict]:
         }
         for h in hits
     ]
-
-
-_HTTPX_TIMEOUT = 12       # seconds for plain-HTTP fast-path
-_MAX_FETCH_CHARS = 20_000  # keep intro + key sections; enough for any fact extraction
-
-
-def _html_to_text(html_str: str) -> str:
-    """Strip HTML tags to plain text using stdlib html.parser (no extra deps)."""
-
-    class _Extractor(_html_parser.HTMLParser):
-        def __init__(self) -> None:
-            super().__init__()
-            self.parts: list[str] = []
-            self._skip_depth = 0
-            self._SKIP = {"script", "style", "nav", "footer", "head", "noscript"}
-
-        def handle_starttag(self, tag: str, attrs: list) -> None:
-            if tag in self._SKIP:
-                self._skip_depth += 1
-
-        def handle_endtag(self, tag: str) -> None:
-            if tag in self._SKIP and self._skip_depth:
-                self._skip_depth -= 1
-
-        def handle_data(self, data: str) -> None:
-            if not self._skip_depth:
-                stripped = data.strip()
-                if stripped:
-                    self.parts.append(stripped)
-
-    p = _Extractor()
-    p.feed(html_str)
-    return "\n".join(p.parts)
-
-
-async def _httpx_fetch(url: str) -> dict | None:
-    """Fast-path fetch via plain HTTP (no headless browser).
-
-    Returns a fetch_url-compatible dict on success, or None if the response
-    is unsuitable (binary, empty, <200 chars) so the caller falls back to
-    crawl4ai.
-    """
-    _HEADERS = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
-    }
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=_HTTPX_TIMEOUT) as client:
-            r = await client.get(url, headers=_HEADERS)
-        if r.status_code >= 400:
-            return {
-                "status": r.status_code,
-                "content_type": "",
-                "length_bytes": 0,
-                "text": f"[HTTP {r.status_code}]",
-            }
-        ctype = r.headers.get("content-type", "")
-        if "html" in ctype or not ctype:
-            text = _html_to_text(r.text)
-        elif "json" in ctype or "text" in ctype:
-            text = r.text
-        else:
-            return None  # binary — let crawl4ai handle it
-        text = text[:_MAX_FETCH_CHARS]
-        if len(text.strip()) < 200:
-            return None  # too little content — crawl4ai may do better
-        return {
-            "status": r.status_code,
-            "content_type": ctype,
-            "length_bytes": len(text.encode("utf-8")),
-            "text": text,
-        }
-    except Exception:
-        return None
 
 
 async def _crawl4ai_fetch(url: str) -> dict:
@@ -278,10 +160,8 @@ async def _crawl4ai_fetch(url: str) -> dict:
 
 @mcp.tool()
 def web_search(query: str, max_results: int = 5) -> list[dict]:
-    """Search the web. Provider chain: Tavily → Exa → Firecrawl → DuckDuckGo. Hard-capped at 5 results. Example: web_search("python asyncio tutorial", 3)."""
+    """Search the web (Tavily primary, DDG fallback). Hard-capped at 5 results. Example: web_search("python asyncio tutorial", 3)."""
     max_results = max(1, min(max_results, MAX_SEARCH_RESULTS))
-
-    # 1. Tavily — best quality, paid (soft cap 950/mo)
     if os.environ.get("TAVILY_API_KEY") and _under_cap("tavily"):
         try:
             results = _tavily_search(query, max_results)
@@ -290,41 +170,14 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
                 return results
         except Exception:
             _bump("tavily", "errors")
-
-    # 2. Exa — neural search, paid (free tier 1 000/mo)
-    if os.environ.get("EXA_API_KEY"):
-        try:
-            results = _exa_search(query, max_results)
-            if results:
-                _bump("exa")
-                return results
-        except Exception:
-            _bump("exa", "errors")
-
-    # 3. Firecrawl — scraping-based search, paid (free tier 500 credits/mo)
-    if os.environ.get("FIRECRAWL_API_KEY"):
-        try:
-            results = _firecrawl_search(query, max_results)
-            if results:
-                _bump("firecrawl")
-                return results
-        except Exception:
-            _bump("firecrawl", "errors")
-
-    # 4. DuckDuckGo — free, no key, rate-limited; last resort
     results = _ddg_search(query, max_results)
     _bump("duckduckgo")
     return results
 
 
 @mcp.tool()
-async def fetch_url(url: str) -> dict:
-    """Fetch content from a URL. Fast plain-HTTP first (~3 s); falls back to crawl4ai for JS-heavy pages. Example: fetch_url("https://en.wikipedia.org/wiki/Python_(programming_language)")."""
-    # Phase 1 — fast path: plain HTTP via httpx (works for Wikipedia, news sites, docs, APIs)
-    result = await _httpx_fetch(url)
-    if result and result.get("text", "").strip():
-        return result
-    # Phase 2 — slow path: headless Chromium via crawl4ai (for JS-rendered SPAs)
+async def fetch_url(url: str, timeout: int = 20) -> dict:
+    """Fetch clean markdown from a URL via crawl4ai (headless Chromium). Example: fetch_url("https://example.com")."""
     return await _crawl4ai_fetch(url)
 
 
@@ -395,11 +248,12 @@ def list_dir(path: str = ".") -> list[dict]:
 
 @mcp.tool()
 def create_file(path: str, content: str) -> dict:
-    """Create a new file in the sandbox; auto-creates parent directories. Example: create_file("memory/note.txt", "hi")."""
+    """Create a new file in the sandbox; errors if it exists. Example: create_file("hello.txt", "hi")."""
     p = _safe(path)
     if p.exists():
         raise ValueError(f"File '{path}' already exists")
-    p.parent.mkdir(parents=True, exist_ok=True)
+    if not p.parent.exists():
+        raise ValueError(f"Parent directory of '{path}' does not exist")
     p.write_text(content, encoding="utf-8")
     return {"ok": True, "path": path, "size_bytes": p.stat().st_size}
 
