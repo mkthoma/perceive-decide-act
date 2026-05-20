@@ -291,8 +291,21 @@ async def next_step(
     """
     messages = _build_messages(goal, hits, attached, history)
 
-    # Build system prompt with live tool catalogue inserted between preamble and rules
-    system = _SYSTEM_PREAMBLE + _build_tool_guide(mcp_tools) + _SYSTEM_RULES
+    # Build system prompt with live tool catalogue inserted between preamble and rules.
+    # When mcp_tools is empty (no-tools fallback due to provider rate limits), replace
+    # the tool guide with an explicit instruction to answer from context only — this
+    # prevents the model from emitting tool call markup or JSON objects as plain text.
+    if mcp_tools:
+        system = _SYSTEM_PREAMBLE + _build_tool_guide(mcp_tools) + _SYSTEM_RULES
+    else:
+        _no_tools_note = (
+            "IMPORTANT: No tools are available for this request.\n"
+            "You MUST return a direct text ANSWER synthesised ONLY from "
+            "ATTACHED ARTIFACTS and HISTORY.\n"
+            "Do NOT output a tool_call, JSON object, code block, or any markup. "
+            "Write plain prose immediately.\n\n"
+        )
+        system = _no_tools_note + _SYSTEM_PREAMBLE + _SYSTEM_RULES
 
     resp = await gw.chat(
         messages,
@@ -398,6 +411,38 @@ async def next_step(
                     )
         except Exception:
             pass  # fall through to text answer
+
+    # Detect JSON tool_call objects emitted as plain text, e.g.:
+    #   {"type": "tool_call", "name": "web_search", "arguments": {...}}
+    #   {"tool_call": {"name": "fetch_url", "arguments": {...}}}
+    # Only converts to a real ToolCall when the named tool exists in mcp_tools;
+    # if the name is not in mcp_tools (e.g. a hallucinated tool like "weather"),
+    # this falls through so agent.py's answer guard can catch and reject it.
+    _stripped = text.strip()
+    if _stripped.startswith("{") or _stripped.startswith("```"):
+        _jt = _stripped
+        if _jt.startswith("```"):
+            _jt = re.sub(r"```\w*\n?", "", _jt).strip()
+        try:
+            import json as _json4
+            _obj = _json4.loads(_jt)
+            if isinstance(_obj, dict):
+                _tc_name: str | None = None
+                _tc_args: dict = {}
+                if _obj.get("type") == "tool_call" and isinstance(_obj.get("name"), str):
+                    _tc_name = _obj["name"]
+                    _tc_args = _obj.get("arguments") or {}
+                elif isinstance(_obj.get("tool_call"), dict):
+                    _inner = _obj["tool_call"]
+                    _tc_name = _inner.get("name") or ""
+                    _tc_args = _inner.get("arguments") or {}
+                if _tc_name and isinstance(_tc_args, dict):
+                    if any(t["name"] == _tc_name for t in mcp_tools):
+                        return DecisionOutput(
+                            tool_call=ToolCall(name=_tc_name, arguments=_tc_args)
+                        )
+        except Exception:
+            pass  # fall through; agent.py guard will handle the garbled text
 
     # Some LLMs prefix their response with the option label ("answer\n...").
     # Strip it so it doesn't pollute the final answer shown to the user.

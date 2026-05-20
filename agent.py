@@ -523,6 +523,40 @@ async def run(query: str) -> str:
                             it += 1
                             continue
 
+                        # Guard: some models emit a JSON tool_call object as plain text
+                        # when they have no native tool_call support (e.g. in no-tools
+                        # fallback mode, or when the named tool doesn't exist in MCP).
+                        # {"type": "tool_call", "name": "...", "arguments": {...}}
+                        _at = answer_text.strip()
+                        _is_json_toolcall = (
+                            _at.startswith("{")
+                            and '"name"' in answer_text
+                            and (
+                                '"tool_call"' in answer_text
+                                or '"type": "tool_call"' in answer_text
+                                or '"type":"tool_call"' in answer_text
+                            )
+                        )
+                        if _is_json_toolcall:
+                            print("  [decision] JSON tool_call object in answer — injecting STOP hint")
+                            history.append(
+                                {
+                                    "iter": it,
+                                    "kind": "action",
+                                    "goal_id": goal.id,
+                                    "tool": "SYSTEM",
+                                    "arguments": {},
+                                    "result_descriptor": (
+                                        "[STOP] Response was a JSON tool_call object, not a text answer. "
+                                        "No tools are available. You MUST produce a plain-text answer "
+                                        "directly from ATTACHED ARTIFACTS — do NOT attempt a tool call."
+                                    ),
+                                    "artifact_id": None,
+                                }
+                            )
+                            it += 1
+                            continue
+
                         # Guard: some models emit __NO_ANSWER__ instead of extracting
                         # data from attached artifacts.  Inject a STOP hint and retry.
                         if "__NO_ANSWER__" in answer_text:
