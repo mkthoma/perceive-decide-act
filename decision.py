@@ -37,11 +37,14 @@ REASONING PROCESS:
 
   STEP 1 — CLASSIFY THE GOAL TYPE (reasoning type: categorisation)
     What kind of work does this goal require?
-    • Acquisition   — fetch / search / retrieve external data → likely tool_call
-    • Synthesis     — compare / recommend / summarize from existing context → likely answer
+    • Acquisition   — fetch / search / retrieve external data NOT yet in context → tool_call
+    • Synthesis     — compare / recommend / determine / select from existing context → answer
     • Memory-read   — recall a saved fact → check MEMORY HITS first, then file-read tool
     • Memory-write  — persist a fact or file → file-create or file-update tool_call
-    • Real-time     — current time / live rates / live weather → MUST use a tool; never guess
+    • Real-time     — FETCH current time / live rates / live weather not yet in context
+                      → MUST use a tool; never guess
+                      EXCEPTION: if the data is already in ATTACHED ARTIFACTS or HISTORY,
+                      this is a Synthesis goal — produce an answer, do NOT re-fetch
 
   STEP 2 — CHECK EXISTING CONTEXT (reasoning type: lookup / evidence scan)
     In this order:
@@ -59,7 +62,8 @@ REASONING PROCESS:
     [ ] If answer: is it substantive (≥ 3 sentences or ≥ 3 items for synthesis goals)?
     [ ] If tool_call: is the tool name in the available TOOL SELECTION list?
     [ ] Am I free of art: handles in path / url arguments?
-    [ ] For real-time queries: am I using a tool (not training-data assumptions)?
+    [ ] For real-time queries: is the data absent from ATTACHED ARTIFACTS and HISTORY?
+        (if already present in context, this is Synthesis — produce an answer)
     [ ] For recommendation answers: do I follow OPTIONS → CONTEXT → RECOMMENDATION order?
 
 You must return EXACTLY ONE of:
@@ -72,8 +76,10 @@ _SYSTEM_RULES = """\
 BEHAVIORAL NOTES (apply to whichever tools are available):
 
   Reasoning type: real-time lookup
-    For current time, live exchange rates, live weather → call the appropriate
-    tool every time. Never answer from training-data or stale memory.
+    For FETCHING current time, live exchange rates, live weather that is NOT yet in
+    context → call the appropriate tool. Never answer from training-data.
+    If HISTORY or ATTACHED ARTIFACTS already contain fresh data from this run,
+    synthesize from it — do NOT re-fetch.
 
   Reasoning type: web research
     Prefer the search tool when snippets contain enough detail.
@@ -93,6 +99,11 @@ BEHAVIORAL NOTES (apply to whichever tools are available):
 
 STRICT RULES:
 - NEVER return both answer and tool_call in the same response.
+- Synthesis / recommendation / determination goals (keywords: determine, recommend,
+  choose, select, compare, most appropriate, which is best) are NEVER Real-time.
+  These goals synthesize from already-fetched data. When ATTACHED ARTIFACTS contain
+  the needed information (weather, search results, etc.), produce an answer immediately
+  — do NOT call any tool, even if the topic involves weather, time, or live data.
 - NEVER emit a tool call as plain text (e.g. "tool_call:name(arg:val)").
   When step 3 selects tool_call, use the native tool_call return format —
   never write it out as a string in an answer field.
