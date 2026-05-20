@@ -278,7 +278,20 @@ async def _crawl4ai_fetch(url: str) -> dict:
 
 @mcp.tool()
 def web_search(query: str, max_results: int = 5) -> list[dict]:
-    """Search the web. Provider chain: Tavily → Exa → Firecrawl → DuckDuckGo. Hard-capped at 5 results. Example: web_search("python asyncio tutorial", 3)."""
+    """Search the web and return snippets from multiple sources.
+
+    USE FOR: current events, weather forecasts, news, sports scores, live prices,
+    general knowledge, finding URLs, anything where multiple short snippets are
+    sufficient.  Best default choice when you need external information.
+
+    Provider chain (automatic fallback): Tavily → Exa → Firecrawl → DuckDuckGo.
+    Hard-capped at 5 results.
+
+    PREFER OVER fetch_url when: snippets are enough, you don't have a specific
+    URL yet, or you need speed (fetch_url is 3–30 s; web_search is ~1–2 s).
+
+    Example: web_search("Tokyo weather this Saturday", 3)
+    """
     max_results = max(1, min(max_results, MAX_SEARCH_RESULTS))
 
     # 1. Tavily — best quality, paid (soft cap 950/mo)
@@ -319,7 +332,20 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
 
 @mcp.tool()
 async def fetch_url(url: str) -> dict:
-    """Fetch content from a URL. Fast plain-HTTP first (~3 s); falls back to crawl4ai for JS-heavy pages. Example: fetch_url("https://en.wikipedia.org/wiki/Python_(programming_language)")."""
+    """Fetch the full text content of a specific URL.
+
+    USE FOR: reading the complete content of a known URL — Wikipedia articles,
+    documentation pages, blog posts, API responses.  Returns full page text,
+    not just a snippet.
+
+    PREFER OVER web_search when: you already have the exact URL and need the
+    full body (e.g. after a web_search returned the URL).
+
+    NOTE: Takes 3–30 seconds.  Avoid for weather sites, social media, or any
+    page that requires JavaScript to render content — use web_search instead.
+
+    Example: fetch_url("https://en.wikipedia.org/wiki/Claude_Shannon")
+    """
     # Phase 1 — fast path: plain HTTP via httpx (works for Wikipedia, news sites, docs, APIs)
     result = await _httpx_fetch(url)
     if result and result.get("text", "").strip():
@@ -330,7 +356,17 @@ async def fetch_url(url: str) -> dict:
 
 @mcp.tool()
 def get_time(timezone: str = "UTC") -> dict:
-    """Current time in a named IANA timezone. Example: get_time("Asia/Kolkata")."""
+    """Get the current date and time in any IANA timezone.
+
+    USE FOR: any query about the current time, date, or day of the week.
+    Always call this for real-time temporal questions — never guess the time.
+
+    The 'timezone' parameter must be a valid IANA name:
+      "UTC", "America/New_York", "America/Los_Angeles", "Europe/London",
+      "Europe/Paris", "Asia/Tokyo", "Asia/Kolkata", "Australia/Sydney"
+
+    Example: get_time("Asia/Tokyo")
+    """
     tz = ZoneInfo(timezone)
     now = datetime.now(tz)
     offset = now.utcoffset()
@@ -345,7 +381,16 @@ def get_time(timezone: str = "UTC") -> dict:
 
 @mcp.tool()
 def currency_convert(amount: float, from_currency: str, to_currency: str) -> dict:
-    """Convert money between ISO-3 currencies via frankfurter.dev. Example: currency_convert(100, "USD", "INR")."""
+    """Convert an amount between currencies using live exchange rates.
+
+    USE FOR: currency conversion, exchange rate queries, "how much is X in Y
+    currency".  Rates are live from frankfurter.dev (ECB reference data).
+    Always call this for currency questions — never use stale training-data rates.
+
+    Parameters use ISO-4217 currency codes: USD, EUR, GBP, JPY, INR, AUD, CAD…
+
+    Example: currency_convert(100, "USD", "EUR")
+    """
     f = from_currency.upper()
     t = to_currency.upper()
     url = f"https://api.frankfurter.dev/v1/latest?amount={amount}&base={f}&symbols={t}"
@@ -367,7 +412,19 @@ def currency_convert(amount: float, from_currency: str, to_currency: str) -> dic
 
 @mcp.tool()
 def read_file(path: str) -> dict:
-    """Read a UTF-8 text file from the sandbox. Example: read_file("notes.txt")."""
+    """Read a UTF-8 text file from the sandbox.
+
+    USE FOR: recalling previously saved facts or data.  User-requested
+    persistent facts are saved under the memory/ directory — check there first
+    before saying information is unavailable.
+
+    Common pattern: if a prior run saved a fact, read it back with
+      read_file("memory/<descriptive_key>.txt")
+
+    Use list_dir("memory") first if you're unsure what memory files exist.
+
+    Example: read_file("memory/moms_birthday.txt")
+    """
     p = _safe(path)
     text = p.read_text(encoding="utf-8")
     return {
@@ -380,7 +437,14 @@ def read_file(path: str) -> dict:
 
 @mcp.tool()
 def list_dir(path: str = ".") -> list[dict]:
-    """List a directory inside the sandbox. Example: list_dir(".")."""
+    """List files and directories inside the sandbox.
+
+    USE FOR: discovering what files exist before reading them.  In particular,
+    call list_dir("memory") to see what facts have been previously saved by
+    the user — then use read_file to retrieve the relevant one.
+
+    Example: list_dir("memory")
+    """
     p = _safe(path)
     out = []
     for child in sorted(p.iterdir()):
@@ -395,7 +459,19 @@ def list_dir(path: str = ".") -> list[dict]:
 
 @mcp.tool()
 def create_file(path: str, content: str) -> dict:
-    """Create a new file in the sandbox; auto-creates parent directories. Example: create_file("memory/note.txt", "hi")."""
+    """Create a new file in the sandbox with given content.
+
+    USE FOR: durably saving any fact or data the user wants to remember.
+    Save to memory/<descriptive_key>.txt so it can be recalled later:
+      create_file("memory/moms_birthday.txt", "May 15, 2026")
+
+    Auto-creates parent directories — no need to create memory/ first.
+
+    IMPORTANT: raises an error if the file already exists.
+    Use update_file instead when the file may already exist.
+
+    Example: create_file("memory/project_deadline.txt", "2026-06-01")
+    """
     p = _safe(path)
     if p.exists():
         raise ValueError(f"File '{path}' already exists")
@@ -406,7 +482,14 @@ def create_file(path: str, content: str) -> dict:
 
 @mcp.tool()
 def update_file(path: str, content: str) -> dict:
-    """Overwrite an existing sandbox file. Example: update_file("hello.txt", "new body")."""
+    """Overwrite an existing file in the sandbox with new content.
+
+    USE FOR: updating a previously saved fact when the file already exists.
+    If you're not sure whether the file exists, use this instead of
+    create_file — it raises an error only if the file is missing.
+
+    Example: update_file("memory/moms_birthday.txt", "May 16, 2026 (corrected)")
+    """
     p = _safe(path)
     if not p.exists():
         raise ValueError(f"File '{path}' does not exist")
@@ -416,7 +499,14 @@ def update_file(path: str, content: str) -> dict:
 
 @mcp.tool()
 def edit_file(path: str, find: str, replace: str, replace_all: bool = False) -> dict:
-    """Find-and-replace inside a sandbox file. Example: edit_file("hello.txt", "foo", "bar")."""
+    """Find and replace text within an existing sandbox file.
+
+    USE FOR: making targeted edits without rewriting the entire file content.
+    Preferred over update_file when only part of the content needs to change.
+    Set replace_all=True to replace every occurrence of the search string.
+
+    Example: edit_file("memory/notes.txt", "old value", "new value")
+    """
     p = _safe(path)
     text = p.read_text(encoding="utf-8")
     count = text.count(find)
