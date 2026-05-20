@@ -17,6 +17,10 @@ _MAX_ARTIFACT_CHARS = 50_000  # safety net only — source is already bounded by
 # instead of native tool_calls:  <function(name){...}</function>
 _FC_RE = re.compile(r"<function\((\w+)\)\s*(\{.*?\})\s*</function>", re.DOTALL)
 
+# Matches "tool_call:name(..." plain-text tool call format emitted by some models
+# when they output the call as a string instead of a native tool_call object.
+_TC_TEXT_RE = re.compile(r"tool_call\s*:?\s*(\w+)\(", re.IGNORECASE)
+
 # ------------------------------------------------------------------------------- #
 # System prompt — split into preamble + dynamic tool guide + rules               #
 # The TOOL SELECTION section is built at call time from the live MCP schema so  #
@@ -89,6 +93,9 @@ BEHAVIORAL NOTES (apply to whichever tools are available):
 
 STRICT RULES:
 - NEVER return both answer and tool_call in the same response.
+- NEVER emit a tool call as plain text (e.g. "tool_call:name(arg:val)").
+  When step 3 selects tool_call, use the native tool_call return format —
+  never write it out as a string in an answer field.
 - MEMORY HITS are part of your context. If a hit's descriptor already contains
   the answer to the current GOAL, answer directly from it — do NOT say the
   information is unavailable.
@@ -304,6 +311,45 @@ async def next_step(
             )
         except Exception:
             pass  # fall through to text answer
+
+    # Detect "tool_call:name(key:val, ...)" plain-text format.
+    # Some models omit native tool_call objects and write the call as a string.
+    # Only anchor key detection to positions after ^ or , to avoid treating
+    # prose words like "Reminder:" as argument names.
+    tc_m = _TC_TEXT_RE.search(text)
+    if tc_m:
+        fn_name = tc_m.group(1)
+        # Find matching closing ')' via balanced-paren scan
+        paren_open = tc_m.end() - 1
+        depth, close = 0, paren_open
+        for _i, _ch in enumerate(text[paren_open:]):
+            if _ch == "(":
+                depth += 1
+            elif _ch == ")":
+                depth -= 1
+                if depth == 0:
+                    close = paren_open + _i
+                    break
+        raw_args = text[paren_open + 1 : close].strip()
+        try:
+            import json as _json2
+            _parsed = _json2.loads(raw_args) if raw_args else {}
+            if not isinstance(_parsed, dict):
+                raise ValueError("not a dict")
+            args: dict = _parsed
+        except Exception:
+            # Key:val fallback — only anchors at ^ or after ','
+            args = {}
+            _anchors = list(re.finditer(r"(?:^|,)\s*(\w+):", raw_args))
+            for _idx, _km in enumerate(_anchors):
+                _key = _km.group(1)
+                _vs = _km.end()
+                _ve = _anchors[_idx + 1].start() if _idx + 1 < len(_anchors) else len(raw_args)
+                args[_key] = raw_args[_vs:_ve].rstrip(", \n")
+        if fn_name and (args or not raw_args):
+            return DecisionOutput(
+                tool_call=ToolCall(name=fn_name, arguments=args)
+            )
 
     # Some LLMs prefix their response with the option label ("answer\n...").
     # Strip it so it doesn't pollute the final answer shown to the user.

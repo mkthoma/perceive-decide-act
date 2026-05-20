@@ -57,6 +57,12 @@ REASONING PROCESS — follow every step in order before producing output:
       AND a recommendation word (which / appropriate / best / suggest / should),
       add a reminder goal LAST.  Example:
         "Save the activity recommendation to memory/reminder.txt"
+    - Apply DATE COMPUTATION: when the query mentions time offsets relative to a
+      known date ("two weeks before", "3 days after", "the week of"), compute all
+      derived dates and embed them explicitly in the goal text — never leave
+      offsets as vague strings.
+      Example: "birthday May 15, 2026, reminder two weeks before and on the day"
+        → "Save reminders for May 1, 2026 (2-week prior) and May 15, 2026 (day-of) to memory/reminder.txt"
 
   STEP 2b — UPDATE DONE FLAGS (subsequent iterations)
     Reasoning type: evidence matching.
@@ -77,6 +83,7 @@ REASONING PROCESS — follow every step in order before producing output:
     [ ] Is artifact_index either null or a real [artifact N] label?
     [ ] Did I apply MEMORY WRITES when the query asked to persist a fact?
     [ ] Did I apply PROACTIVE REMINDERS for time-bound recommendation queries?
+    [ ] For date-offset goals: have I computed exact derived dates, not left them as offsets?
     [ ] Are all goals ≤ 15 words and imperative (start with a verb)?
 
 ERROR HANDLING / FALLBACKS:
