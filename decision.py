@@ -93,6 +93,14 @@ STRICT RULES:
   call the appropriate tool — never answer from memory or stale assumptions.
 - For extraction, list, comparison, recommendation, or synthesis goals: your answer
   must be substantive — at least 3 sentences or a numbered/bulleted list of ≥ 3 items.
+- For recommendation / "which is best" synthesis goals (e.g. "determine which
+  activity is most appropriate", "recommend the best option based on X"): your
+  answer MUST be fully self-contained.  Include:
+    1. The complete list of all options found in prior HISTORY answers.
+    2. The relevant context (weather, constraints, etc.) from prior answers.
+    3. The recommendation with clear reasoning.
+  Do NOT write only the recommendation — the reader has not seen prior sub-goal
+  answers and needs all the information in one response.
 - If HISTORY already contains a tool result for this goal, answer from that result
   directly — do not call the same tool again.
 - If ATTACHED ARTIFACTS do not contain the data needed for this goal, do NOT answer
@@ -132,7 +140,7 @@ def _format_history(history: list[dict]) -> str:
             )
         elif kind == "answer":
             entries.append(
-                f"  iter {h['iter']}: ANSWER: {h.get('text', '')[:300]}"
+                f"  iter {h['iter']}: ANSWER: {h.get('text', '')[:800]}"
             )
     return "\n".join(entries) if entries else "  (empty)"
 

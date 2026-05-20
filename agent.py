@@ -187,9 +187,27 @@ def _final_answer_from(history: list[dict], goals: list[Goal]) -> str:
             break
 
     if last_answered_goal and _is_synthesis_goal(last_answered_goal.text):
-        # Final goal is a true integration step — its answer already covers
-        # the sub-goal answers; return just that.
-        return answer_by_goal[last_answered_goal.id]
+        # Final goal is a true integration step.  Return its answer alone IF it
+        # looks self-contained (has multiple items / sentences from prior goals).
+        # If the synthesis answer is very short it probably only stated the
+        # recommendation without listing the options — fall through to join.
+        synth_text = answer_by_goal[last_answered_goal.id]
+        # Heuristic: a self-contained synthesis answer has ≥ 3 list markers or
+        # ≥ 4 sentences, meaning it summarised the full context.
+        _list_markers = synth_text.count("\n-") + synth_text.count("\n*") + synth_text.count("\n1.")
+        _sentences = synth_text.count(". ") + synth_text.count(".\n")
+        if _list_markers >= 2 or _sentences >= 3:
+            return synth_text
+        # Synthesis answer seems incomplete — prepend prior sub-goal answers so
+        # the user sees all the gathered information plus the recommendation.
+        prior_answers = [
+            answer_by_goal[g.id]
+            for g in goals
+            if g.id in answer_by_goal and g.id != last_answered_goal.id
+        ]
+        if prior_answers:
+            return "\n\n".join(prior_answers) + "\n\n" + synth_text
+        return synth_text
 
     # No integrating final goal — join all answers in goal order.
     # Use double newline (not ---) so the output reads as one cohesive response.
