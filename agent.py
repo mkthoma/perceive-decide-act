@@ -59,7 +59,7 @@ def _ensure_sandbox_dirs() -> None:
 
 # Keywords that signal a synthesis / extraction goal → force-attach safety net
 _SYNTHESIS_KW = frozenset(
-    "synthesize synthesise extract compare decide summarize summarise "
+    "synthesize synthesise compare decide summarize summarise "
     "recommend choose select appropriate agree common findings "
     "analyze analyse collate distil distill".split()
 )
@@ -205,7 +205,7 @@ def _final_answer_from(history: list[dict], goals: list[Goal]) -> str:
 
         # If the synthesis answer has fewer numbered items than prior data goals,
         # it dropped some options — prepend the prior answers so nothing is lost.
-        if _prior_count > 1 and _numbered < _prior_count:
+        if _prior_count >= 1 and _numbered < _prior_count:
             prior_answers = [
                 answer_by_goal[g.id]
                 for g in goals
