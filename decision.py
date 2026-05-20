@@ -17,77 +17,36 @@ _MAX_ARTIFACT_CHARS = 50_000  # safety net only — source is already bounded by
 # instead of native tool_calls:  <function(name){...}</function>
 _FC_RE = re.compile(r"<function\((\w+)\)\s*(\{.*?\})\s*</function>", re.DOTALL)
 
-_SYSTEM = """\
+# ------------------------------------------------------------------------------- #
+# System prompt — split into preamble + dynamic tool guide + rules               #
+# The TOOL SELECTION section is built at call time from the live MCP schema so  #
+# adding or renaming a tool in mcp_server.py is automatically reflected here.   #
+# ------------------------------------------------------------------------------- #
+
+_SYSTEM_PREAMBLE = """\
 You are DECISION, the action selector in an agentic loop.
 
 You receive one GOAL and supporting context. You must return EXACTLY ONE of:
   1. answer   — a direct response you can produce from CONTEXT or ATTACHED ARTIFACTS
   2. tool_call — when you need external data or actions not already present in context
 
-TOOL SELECTION — reason from the goal and context to choose the right tool:
-  Before calling any tool, ask: "What does this goal need, and which tool
-  provides exactly that?"  Use the guide below to answer that question.
+"""
 
-  web_search(query, max_results=5)
-      Best default for any external information need: current events, weather,
-      news, prices, sports scores, general knowledge, finding URLs.
-      Use snippets to answer directly when they contain enough detail.
-      Prefer this over fetch_url unless you need the full page body.
-
-  fetch_url(url)
-      Fetches the complete text of one specific URL via headless browser.
-      Use AFTER web_search has returned a URL whose full content you need.
-      Takes 10–60 s; avoid for weather pages, social media, or JS-heavy sites
-      where web_search snippets are sufficient.
-
-      FOR "read N results" GOALS (e.g. "read the top 3 results"):
-      • Count the fetch_url calls already in HISTORY for this goal.
-      • Call fetch_url for the NEXT URL from search results until N calls
-        are made or all remaining URLs have timed out.
-      • If a [tool_timeout] occurs, immediately try the NEXT URL from the
-        list — do NOT retry the same URL.
-      • Only answer this goal once all N URLs have been attempted (success
-        or timeout).  Answer from available fetched artifacts + snippets.
-
-  get_time(timezone)
-      Returns the current date and time. Required for ANY time/date query —
-      never guess the current time from training data.
-      timezone must be a valid IANA name: "UTC", "America/New_York",
-      "Europe/London", "Asia/Tokyo", "Asia/Kolkata", "Australia/Sydney", etc.
-
-  currency_convert(amount, from_currency, to_currency)
-      Converts between currencies using live rates. Required for any exchange-
-      rate or currency-conversion question — never use stale knowledge.
-      Currency codes are ISO-4217: USD, EUR, GBP, JPY, INR, AUD, CAD …
-
-  read_file(path)
-      Reads a sandbox file. Use to recall facts saved in memory/:
-        read_file("memory/<key>.txt")
-      If MEMORY HITS show a memory/ file was previously written, read it before
-      saying the information is unavailable.
-
-  list_dir(path=".")
-      Lists sandbox contents. Call list_dir("memory") to discover what facts
-      have been saved before attempting read_file.
-
-  create_file(path, content)
-      Saves a new file. Use for durably persisting facts:
-        create_file("memory/<key>.txt", "<the fact>")
-      IMPORTANT: the parent directory must already exist.
-      The memory/ directory is always pre-created — write there safely.
-      Raises an error if the file already exists; use update_file in that case.
-
-  update_file(path, content)
-      Overwrites an existing file. Use when a memory/ file already exists and
-      you need to correct or extend its contents.
-
-  edit_file(path, find, replace, replace_all=False)
-      Targeted find-and-replace inside an existing file. Use for partial edits
-      when you don't want to rewrite the whole file content.
-
-  If NO available tool can satisfy the goal (set a calendar reminder, send
-  an email, post to social media, book a flight, etc.), answer directly with
-  a clear description of what the user should do — do NOT loop or retry.
+_SYSTEM_RULES = """\
+BEHAVIORAL NOTES (apply to whichever tools are available):
+- For real-time data (current time, live exchange rates, live weather), call the
+  appropriate tool — never answer from memory or training-data assumptions.
+- For web search goals: prefer the search tool when snippets contain enough detail;
+  use URL-fetch only when you need the full page body after a search gave you a URL.
+- For durable memory: use the file-listing tool to discover saved facts, the
+  file-read tool to load them, the file-create tool to save new ones (raises if
+  exists), and the file-update tool to overwrite an existing file.
+  The memory/ directory is always pre-created — write there safely.
+  Example paths: "memory/<key>.txt"
+- FOR "read N results" GOALS: count URL-fetch calls in HISTORY for this goal.
+  Call the URL-fetch tool for the NEXT URL from search results until N calls are
+  made or all remaining URLs have timed out. If [tool_timeout] occurs, skip to the
+  NEXT URL — do NOT retry the same one. Answer only after all N URLs are attempted.
 
 STRICT RULES:
 - NEVER return both answer and tool_call in the same response.
@@ -98,10 +57,8 @@ STRICT RULES:
   as path or url arguments to any tool. The artifact bytes are in ATTACHED ARTIFACTS.
 - If HISTORY contains a [STOP] line, the previous tool call was illegal.
   Answer directly from ATTACHED ARTIFACTS — do NOT call any tool.
-- For real-time data (current time, live exchange rates, live weather), you MUST
-  call the appropriate tool — never answer from memory or stale assumptions.
 - For extraction, list, comparison, recommendation, or synthesis goals: your answer
-  must be substantive — at least 3 sentences or a numbered/bulleted list of ≥ 3 items.
+  must be substantive — at least 3 sentences or a numbered/bulleted list of >= 3 items.
 - For recommendation / "which is best" synthesis goals (e.g. "determine which
   activity is most appropriate", "recommend the best option based on X"): your
   answer MUST be fully self-contained and follow this exact structure:
@@ -113,9 +70,9 @@ STRICT RULES:
   The reader has not seen prior sub-goal answers.  Omitting any option from
   step 1 is an error — always enumerate the full set first.
 - If HISTORY already contains a tool result for this goal, answer from that result
-  directly — do not call the same tool again, UNLESS the goal requires N fetches
+  directly — do not call the same tool again, UNLESS the goal requires N URL fetches
   (e.g. "read the top 3 results") and fewer than N have been made yet — in that
-  case keep calling fetch_url for the next URL until all N are attempted.
+  case keep fetching the next URL until all N are attempted.
 - If ATTACHED ARTIFACTS do not contain the data needed for this goal, do NOT answer
   saying the data is missing. Call the appropriate tool to fetch it instead.
 - If HISTORY shows 3 or more consecutive search/fetch results with "No results found"
@@ -124,14 +81,74 @@ STRICT RULES:
   knowledge — do NOT call any search or fetch tool again.
 - If HISTORY contains "[tool_timeout]" for this goal, switch to a different tool
   strategy — do NOT retry the same URL.  EXCEPTION: for "read N results" goals,
-  a timeout on one URL means skip to the NEXT URL (still using fetch_url) until
-  all N URLs have been attempted, then answer from whatever content was retrieved.
+  a timeout on one URL means skip to the NEXT URL until all N have been attempted.
 - NEVER output "__NO_ANSWER__", "N/A", "NONE", or any single-word placeholder
   as a standalone response.  Always produce either a substantive text answer
   (at least one full sentence) or a single tool_call.
 - If ATTACHED ARTIFACTS are present AND HISTORY shows a fetch or search tool
   already returned results for this goal, synthesize your answer directly from
   the artifact content — do not output a placeholder or call a tool again."""
+
+
+def _build_tool_guide(tools: list[dict]) -> str:
+    """Generate the TOOL SELECTION section from the live MCP tool schemas.
+
+    Called once per decision step so the prompt always matches whatever tools
+    the MCP server currently exposes — no hardcoding, never stale.
+    """
+    if not tools:
+        return ""
+
+    lines: list[str] = [
+        "TOOL SELECTION — reason from the goal and context to choose the right tool:",
+        "  Before calling any tool, ask: \"What does this goal need, and which tool",
+        "  provides exactly that?\"  The tools below are discovered live from the MCP",
+        "  server at runtime — this list is always current.",
+        "",
+    ]
+
+    for tool in tools:
+        name = tool.get("name", "unknown")
+        desc = (tool.get("description") or "").strip()
+        schema = tool.get("input_schema") or {}
+        props: dict = schema.get("properties") or {}
+        required: set[str] = set(schema.get("required") or [])
+
+        # Signature: required params positional, optional as param=<type>
+        sig_parts: list[str] = []
+        for pname, pinfo in props.items():
+            ptype = pinfo.get("type", "any")
+            if pname in required:
+                sig_parts.append(pname)
+            else:
+                sig_parts.append(f"{pname}=<{ptype}>")
+
+        lines.append(f"  {name}({', '.join(sig_parts)})")
+
+        # Tool-level description (from MCP server docstring)
+        if desc:
+            for dline in desc.splitlines():
+                lines.append(f"      {dline.strip()}")
+
+        # Per-parameter descriptions when available
+        param_notes: list[str] = []
+        for pname, pinfo in props.items():
+            pdesc = (pinfo.get("description") or "").strip()
+            if pdesc:
+                req_label = "required" if pname in required else "optional"
+                param_notes.append(f"        {pname} ({req_label}): {pdesc}")
+        lines.extend(param_notes)
+
+        lines.append("")
+
+    lines.append(
+        "  If NO available tool can satisfy the goal (e.g. set a calendar alert,\n"
+        "  send an email, post to social media, book a flight), answer directly\n"
+        "  with what the user should do manually — do NOT loop or retry."
+    )
+    lines.append("")
+
+    return "\n".join(lines)
 
 
 def _format_hits(hits: list[MemoryItem]) -> str:
@@ -197,12 +214,20 @@ async def next_step(
     history: list[dict],
     mcp_tools: list[dict],
 ) -> DecisionOutput:
-    """One LLM call — returns answer text or a single ToolCall."""
+    """One LLM call — returns answer text or a single ToolCall.
+
+    The system prompt is assembled at call time: the TOOL SELECTION section is
+    generated from the live ``mcp_tools`` schemas so it always reflects whatever
+    the MCP server currently exposes — no manual updates needed when tools change.
+    """
     messages = _build_messages(goal, hits, attached, history)
+
+    # Build system prompt with live tool catalogue inserted between preamble and rules
+    system = _SYSTEM_PREAMBLE + _build_tool_guide(mcp_tools) + _SYSTEM_RULES
 
     resp = await gw.chat(
         messages,
-        system=_SYSTEM,
+        system=system,
         auto_route="decision",
         tools=mcp_tools if mcp_tools else None,
         tool_choice="auto" if mcp_tools else None,
