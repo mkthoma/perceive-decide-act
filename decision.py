@@ -40,6 +40,15 @@ TOOL SELECTION — reason from the goal and context to choose the right tool:
       Takes 10–60 s; avoid for weather pages, social media, or JS-heavy sites
       where web_search snippets are sufficient.
 
+      FOR "read N results" GOALS (e.g. "read the top 3 results"):
+      • Count the fetch_url calls already in HISTORY for this goal.
+      • Call fetch_url for the NEXT URL from search results until N calls
+        are made or all remaining URLs have timed out.
+      • If a [tool_timeout] occurs, immediately try the NEXT URL from the
+        list — do NOT retry the same URL.
+      • Only answer this goal once all N URLs have been attempted (success
+        or timeout).  Answer from available fetched artifacts + snippets.
+
   get_time(timezone)
       Returns the current date and time. Required for ANY time/date query —
       never guess the current time from training data.
@@ -102,7 +111,9 @@ STRICT RULES:
   Do NOT write only the recommendation — the reader has not seen prior sub-goal
   answers and needs all the information in one response.
 - If HISTORY already contains a tool result for this goal, answer from that result
-  directly — do not call the same tool again.
+  directly — do not call the same tool again, UNLESS the goal requires N fetches
+  (e.g. "read the top 3 results") and fewer than N have been made yet — in that
+  case keep calling fetch_url for the next URL until all N are attempted.
 - If ATTACHED ARTIFACTS do not contain the data needed for this goal, do NOT answer
   saying the data is missing. Call the appropriate tool to fetch it instead.
 - If HISTORY shows 3 or more consecutive search/fetch results with "No results found"
@@ -110,7 +121,9 @@ STRICT RULES:
 - If HISTORY contains "[SEARCH_EXHAUSTED:" for this goal, answer from your own
   knowledge — do NOT call any search or fetch tool again.
 - If HISTORY contains "[tool_timeout]" for this goal, switch to a different tool
-  strategy — do NOT call the same tool type again.
+  strategy — do NOT retry the same URL.  EXCEPTION: for "read N results" goals,
+  a timeout on one URL means skip to the NEXT URL (still using fetch_url) until
+  all N URLs have been attempted, then answer from whatever content was retrieved.
 - NEVER output "__NO_ANSWER__", "N/A", "NONE", or any single-word placeholder
   as a standalone response.  Always produce either a substantive text answer
   (at least one full sentence) or a single tool_call.
