@@ -62,6 +62,14 @@ RULES:
     "Save mom's birthday (May 15, 2026) to memory/moms_birthday.txt"
   Place this memory-write goal FIRST so the fact is persisted before any
   follow-up actions that depend on it.
+- PROACTIVE REMINDERS: If the query mentions a near-future time reference
+  ("this weekend", "Saturday", "Sunday", "tonight", "tomorrow", "next week",
+  or a specific calendar date) AND asks for a recommendation or best-choice
+  decision ("which one", "most appropriate", "best", "recommend", "suggest",
+  "should I"), you MUST add a FINAL goal (after all synthesis goals) to
+  persist the recommendation as a reminder. Example goal text:
+    "Save the activity recommendation to memory/reminder.txt"
+  This goal goes last so it captures the fully reasoned recommendation.
 - Return ONLY valid JSON matching the schema. No prose or commentary."""
 
 

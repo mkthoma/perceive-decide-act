@@ -69,6 +69,16 @@ _MEMORY_WRITE_KW = frozenset(
     "remember save store persist record note keep memorize memorise".split()
 )
 
+# Near-future time references that imply a reminder is useful.
+_TIME_BOUND_KW = frozenset(
+    "weekend saturday sunday tonight tomorrow today".split()
+)
+
+# Words that signal a recommendation/best-choice decision is being requested.
+_RECOMMENDATION_KW = frozenset(
+    "appropriate recommend best suggest which should".split()
+)
+
 # First-word verbs that mean "go get the data" — goal is satisfied by a
 # successful tool call alone, no textual answer needed.
 # Exclude "check" (implies verify/report) and "find" (implies selection).
@@ -144,6 +154,21 @@ def _has_memory_write_goal(goals: list[Goal]) -> bool:
     for g in goals:
         lower = g.text.lower()
         if any(kw in lower for kw in ("memory/", "create_file", "save", "store", "persist", "record")):
+            return True
+    return False
+
+
+def _has_time_bound_reminder_intent(query: str) -> bool:
+    """True when the query has a near-future time reference AND asks for a recommendation."""
+    words = set(query.lower().split())
+    return bool(words & _TIME_BOUND_KW) and bool(words & _RECOMMENDATION_KW)
+
+
+def _has_reminder_goal(goals: list[Goal]) -> bool:
+    """True when at least one goal writes a reminder file."""
+    for g in goals:
+        lower = g.text.lower()
+        if "reminder" in lower and any(kw in lower for kw in ("memory/", "save", "create_file")):
             return True
     return False
 
@@ -313,6 +338,21 @@ async def run(query: str) -> str:
                         )
                         prior_goals.insert(0, save_goal)
                         print(f"  [agent] injected memory-write goal: {save_goal.text}")
+
+                    # Safety net: if the query is a time-bound recommendation
+                    # but Perception produced no reminder-write goal, inject
+                    # one at the END so it captures the completed recommendation.
+                    if (
+                        _has_time_bound_reminder_intent(query)
+                        and not _has_reminder_goal(prior_goals)
+                    ):
+                        reminder_goal = Goal(
+                            id=uuid.uuid4().hex[:8],
+                            text="Save the activity recommendation to memory/reminder.txt",
+                            done=False,
+                        )
+                        prior_goals.append(reminder_goal)
+                        print(f"  [agent] injected reminder goal: {reminder_goal.text}")
                 else:
                     # Reuse prior_goals directly — no LLM call needed.
                     obs = Observation(goals=list(prior_goals))
