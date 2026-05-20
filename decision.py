@@ -21,6 +21,14 @@ _FC_RE = re.compile(r"<function\((\w+)\)\s*(\{.*?\})\s*</function>", re.DOTALL)
 # when they output the call as a string instead of a native tool_call object.
 _TC_TEXT_RE = re.compile(r"tool_call\s*:?\s*(\w+)\(", re.IGNORECASE)
 
+# Matches the positional-argument form: tool_call(name, {json_args})
+# where the function name is the first positional argument rather than part of
+# the call syntax.  Example: tool_call(web_search, {"query": "..."})
+_TC_FUNC_RE = re.compile(
+    r"tool_call\s*\(\s*(\w+)\s*,\s*(\{.*?\})\s*\)",
+    re.DOTALL,
+)
+
 # Matches Llama 3.1/3.2-style function call markup emitted as plain text:
 #   <|tool_calls_section_begin|><|tool_call_begin|>functions.<id_or_name>
 #   <|tool_call_argument_begin|>{...}<|tool_call_end|>
@@ -386,6 +394,21 @@ async def next_step(
             return DecisionOutput(
                 tool_call=ToolCall(name=fn_name, arguments=args)
             )
+
+    # Detect positional-argument form: tool_call(name, {json_args})
+    # Example: tool_call(web_search, {"query": "...", "max_results": 3})
+    tc_func_m = _TC_FUNC_RE.search(text)
+    if tc_func_m:
+        try:
+            import json as _json2b
+            _fn = tc_func_m.group(1)
+            _args = _json2b.loads(tc_func_m.group(2))
+            if _fn and isinstance(_args, dict):
+                return DecisionOutput(
+                    tool_call=ToolCall(name=_fn, arguments=_args)
+                )
+        except Exception:
+            pass  # fall through to Llama / JSON-obj parsers
 
     # Detect Llama 3.1/3.2-style tool call markup emitted as plain text.
     # The "function name" field is often a tool-use ID (toolu_...) rather than
