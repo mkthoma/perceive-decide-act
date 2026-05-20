@@ -344,6 +344,48 @@ async def run(query: str) -> str:
                     if goal is None:
                         break
 
+                    # Short-circuit redundant synthesis steps: if a prior goal in
+                    # this run already produced a substantive answer covering the
+                    # same content, reuse it rather than calling Decision again.
+                    # A cheap/TINY model given a redundant "present/synthesize" step
+                    # may hallucinate or repeat garbage when the context already
+                    # contains a good answer.
+                    # Exception: genuine integration goals (determine / recommend /
+                    # compare / select / based on) need Decision even when prior
+                    # answers exist — they perform real cross-artifact reasoning.
+                    if _is_synthesis_goal(goal.text):
+                        _prior_run_answers = [
+                            h["text"] for h in history
+                            if h.get("kind") == "answer"
+                            and h.get("goal_id") != goal.id
+                            and len(h.get("text", "")) > 150
+                        ]
+                        _is_integrating = any(
+                            kw in goal.text.lower()
+                            for kw in (
+                                "determine", "recommend", "compare", "select",
+                                "choose", "most appropriate", "which is best",
+                                "based on",
+                            )
+                        )
+                        if _prior_run_answers and not _is_integrating:
+                            _reused = _prior_run_answers[-1]
+                            history.append(
+                                {
+                                    "iter": it,
+                                    "kind": "answer",
+                                    "goal_id": goal.id,
+                                    "text": _reused,
+                                }
+                            )
+                            goal.done = True
+                            print(
+                                "  [synth-skip] prior answer satisfies synthesis goal"
+                                " — skipping redundant re-synthesis"
+                            )
+                            it += 1
+                            continue
+
                     # ── Artifact attachment ─────────────────────────────────── #
                     attached: list[tuple[str, bytes]] = []
 
