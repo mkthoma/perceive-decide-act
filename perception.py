@@ -52,11 +52,6 @@ REASONING PROCESS — follow every step in order before producing output:
     - Apply MEMORY WRITES: if query contains "remember / save / store / note / record / keep",
       add a durable-save goal FIRST.  Example:
         "Save mom's birthday (May 15, 2026) to memory/moms_birthday.txt"
-    - Apply PROACTIVE REMINDERS: if query contains a near-future time reference
-      (weekend / Saturday / Sunday / tonight / tomorrow / next week / specific date)
-      AND a recommendation word (which / appropriate / best / suggest / should),
-      add a reminder goal LAST.  Example:
-        "Save the activity recommendation to memory/reminder.txt"
     - Apply DATE COMPUTATION: when the query mentions time offsets relative to a
       known date ("two weeks before", "3 days after", "the week of"), compute all
       derived dates and embed them explicitly in the goal text — never leave
@@ -82,7 +77,6 @@ REASONING PROCESS — follow every step in order before producing output:
     [ ] Is goal order identical to the original decomposition?
     [ ] Is artifact_index either null or a real [artifact N] label?
     [ ] Did I apply MEMORY WRITES when the query asked to persist a fact?
-    [ ] Did I apply PROACTIVE REMINDERS for time-bound recommendation queries?
     [ ] For date-offset goals: have I computed exact derived dates, not left them as offsets?
     [ ] Are all goals ≤ 15 words and imperative (start with a verb)?
 
