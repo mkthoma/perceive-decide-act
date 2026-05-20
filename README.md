@@ -189,7 +189,7 @@ ERROR HANDLING / FALLBACKS:
 Return ONLY valid JSON matching the schema. No prose or commentary outside JSON.
 ```
 
-#### PoP validation (9-criteria rubric)
+#### [PoP validation](https://github.com/mkthoma/perceive-decide-act/blob/main/prompt_evaluator.md) (9-criteria rubric)
 
 ```json
 {
@@ -343,7 +343,7 @@ STRICT RULES:
   the artifact content — do not output a placeholder or call a tool again.
 ```
 
-#### PoP validation (9-criteria rubric)
+#### [PoP validation](https://github.com/mkthoma/perceive-decide-act/blob/main/prompt_evaluator.md) (9-criteria rubric)
 
 ```json
 {
