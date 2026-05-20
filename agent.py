@@ -118,16 +118,22 @@ def _is_acquisition_goal(text: str) -> bool:
 def _final_answer_from(history: list[dict], goals: list[Goal]) -> str:
     """Build the final answer from history.
 
-    When multiple goals each produced an answer, join them in goal order so
-    every sub-question is represented in the output (e.g. birth date AND
-    contributions, not just whichever was answered last).
+    Preference order:
+    1. If a synthesis / extraction goal produced an answer, return only that
+       (sub-goal answers are intermediate steps, not the final reply).
+    2. If multiple non-synthesis goals produced answers, join them in goal order.
+    3. Fall back to the last action descriptor if no answer was recorded.
     """
-    # Collect the last answer for each goal_id (later entries overwrite earlier)
+    # Collect the last answer for each goal_id (later entries overwrite earlier).
+    # Skip __NO_ANSWER__ sentinels — they are model placeholders, not real answers.
     answer_by_goal: dict[str, str] = {}
     for h in history:
         if h.get("kind") == "answer" and h.get("text"):
+            text = h["text"]
+            if "__NO_ANSWER__" in text:
+                continue
             gid = h.get("goal_id", "")
-            answer_by_goal[gid] = h["text"]
+            answer_by_goal[gid] = text
 
     if not answer_by_goal:
         for h in reversed(history):
@@ -138,7 +144,17 @@ def _final_answer_from(history: list[dict], goals: list[Goal]) -> str:
     if len(answer_by_goal) == 1:
         return next(iter(answer_by_goal.values()))
 
-    # Multiple goals — return answers in goal order, one paragraph per goal
+    # Multiple goals answered.  Synthesis goals integrate sub-answers — when one
+    # is present, return only the last synthesis answer (skip raw sub-goal answers
+    # to avoid repetitive output with --- separators).
+    synthesis_answers: list[str] = []
+    for g in goals:
+        if g.id in answer_by_goal and _is_synthesis_goal(g.text):
+            synthesis_answers.append(answer_by_goal[g.id])
+    if synthesis_answers:
+        return synthesis_answers[-1]
+
+    # No synthesis goal — join all distinct answers in goal order
     ordered: list[str] = []
     seen: set[str] = set()
     for g in goals:
@@ -279,14 +295,38 @@ async def run(query: str) -> str:
                     break
 
                 if out.is_answer:
-                    preview = (out.answer or "")[:200]
-                    print(f"  [decision] ANSWER: {preview}{'...' if len(out.answer or '') > 200 else ''}")
+                    answer_text = (out.answer or "").strip()
+                    preview = answer_text[:200]
+                    print(f"  [decision] ANSWER: {preview}{'...' if len(answer_text) > 200 else ''}")
+
+                    # Guard: some models emit __NO_ANSWER__ instead of extracting
+                    # data from attached artifacts.  Inject a STOP hint and retry.
+                    if "__NO_ANSWER__" in answer_text:
+                        print(f"  [decision] no-answer sentinel — injecting STOP hint")
+                        history.append(
+                            {
+                                "iter": it,
+                                "kind": "action",
+                                "goal_id": goal.id,
+                                "tool": "SYSTEM",
+                                "arguments": {},
+                                "result_descriptor": (
+                                    "[STOP] The previous response was a placeholder. "
+                                    "ATTACHED ARTIFACTS contain the requested data. "
+                                    "Extract the information and produce a real answer "
+                                    "NOW — do NOT call any tool."
+                                ),
+                                "artifact_id": None,
+                            }
+                        )
+                        continue
+
                     history.append(
                         {
                             "iter": it,
                             "kind": "answer",
                             "goal_id": goal.id,
-                            "text": out.answer,
+                            "text": answer_text,
                         }
                     )
                     # Mark done immediately — don't rely on Perception to infer it
@@ -395,6 +435,7 @@ async def run(query: str) -> str:
     _no_real_answer = (
         answer == "Task completed with no answer recorded."
         or answer.startswith("Task completed. Last action:")
+        or "__NO_ANSWER__" in answer
     )
     if _no_real_answer and not fatal_error:
         try:

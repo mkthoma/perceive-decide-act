@@ -59,14 +59,24 @@ STRICT RULES:
   the FULL rendered content of a specific page AND web_search snippets are not enough.
 - If HISTORY contains ANY [tool_timeout] result, do NOT call fetch_url again for
   this goal. Switch to web_search immediately and answer from those results.
-- When the user asks to "remember" something, use create_file to save the fact:
+- When the goal asks to "remember", "save", "store", "persist", "record", or
+  "write" a fact or piece of information to memory, use create_file to save it
+  durably:
     create_file(path="memory/{key}.txt", content="...the fact...")
-  Parent directories are created automatically — do NOT call create_file just to
-  make a directory; go straight to creating the file.
+  This applies whether the goal text says "remember my mom's birthday", "save
+  the birthday in memory", "store this fact", "persist X to memory/", or any
+  similar phrasing.  Parent directories are created automatically — do NOT call
+  create_file just to make a directory; go straight to creating the file.
 - To RECALL a previously remembered fact, call read_file on the relevant
   memory/ path, e.g. read_file(path="memory/moms_birthday.txt"). If MEMORY HITS
   include a [tool_outcome] showing a memory/ file was written for a related topic,
-  read that file — do NOT answer "I don't know" without checking first."""
+  read that file — do NOT answer "I don't know" without checking first.
+- NEVER output "__NO_ANSWER__", "N/A", "NONE", or any single-word placeholder
+  as a standalone response.  Always produce either a substantive text answer
+  (at least one full sentence) or a single tool_call.
+- If ATTACHED ARTIFACTS are present AND HISTORY shows a fetch or search tool
+  already returned results for this goal, synthesize your answer directly from
+  the artifact content — do not output a placeholder or call a tool again."""
 
 
 def _format_hits(hits: list[MemoryItem]) -> str:
