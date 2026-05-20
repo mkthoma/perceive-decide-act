@@ -122,12 +122,16 @@ def _final_answer_from(history: list[dict], goals: list[Goal]) -> str:
     every sub-question is represented in the output (e.g. birth date AND
     contributions, not just whichever was answered last).
     """
-    # Collect the last answer for each goal_id (later entries overwrite earlier)
+    # Collect the last answer for each goal_id (later entries overwrite earlier).
+    # Skip __NO_ANSWER__ sentinels — they are retry hints, not real answers.
     answer_by_goal: dict[str, str] = {}
     for h in history:
         if h.get("kind") == "answer" and h.get("text"):
+            text = h["text"]
+            if text.strip() == "__NO_ANSWER__":
+                continue
             gid = h.get("goal_id", "")
-            answer_by_goal[gid] = h["text"]
+            answer_by_goal[gid] = text
 
     if not answer_by_goal:
         for h in reversed(history):
@@ -240,8 +244,7 @@ async def run(query: str) -> str:
 
                 # For synthesis goals attach ALL artifacts collected this run
                 # (up to 3) so Decision has every piece of data it needs in one
-                # call.  Falls back to keyword-filtered memory hits if the run
-                # has produced no artifacts yet.
+                # call.  Only uses current-run history — never stale memory hits.
                 if not attached and _is_synthesis_goal(goal.text):
                     seen: set[str] = set()
                     for h in history:
@@ -253,20 +256,21 @@ async def run(query: str) -> str:
                             print(f"  [force-attach] {art_id} ({len(raw):,} bytes)")
                             if len(attached) >= 3:
                                 break
-                    # Fallback: keyword-filtered memory hits
-                    if not attached:
-                        goal_words = set(goal.text.lower().split())
-                        for hit in reversed(hits):
-                            if hit.artifact_id and artifacts.exists(hit.artifact_id):
-                                artifact_kw = set(getattr(hit, "keywords", []))
-                                if not artifact_kw or (goal_words & artifact_kw):
-                                    raw = artifacts.get_bytes(hit.artifact_id)
-                                    attached.append((hit.artifact_id, raw))
-                                    print(
-                                        f"  [force-attach] {hit.artifact_id} "
-                                        f"({len(raw):,} bytes)"
-                                    )
-                                    break
+
+                # Goal-artifact auto-attach: if this specific goal produced an
+                # artifact in a prior iteration (e.g. fetch → extract pattern),
+                # attach it now so Decision has the bytes without re-fetching.
+                # Covers the case where Perception only ran on iter 1 and never
+                # had a chance to set attach_artifact_id on later iterations.
+                if not attached:
+                    for h in reversed(history):
+                        if h.get("goal_id") == goal.id and h.get("artifact_id"):
+                            art_id = h["artifact_id"]
+                            if artifacts.exists(art_id):
+                                raw = artifacts.get_bytes(art_id)
+                                attached.append((art_id, raw))
+                                print(f"  [goal-attach] {art_id} ({len(raw):,} bytes)")
+                                break
 
                 # ── Decision ───────────────────────────────────────────── #
                 try:
@@ -279,14 +283,38 @@ async def run(query: str) -> str:
                     break
 
                 if out.is_answer:
-                    preview = (out.answer or "")[:200]
-                    print(f"  [decision] ANSWER: {preview}{'...' if len(out.answer or '') > 200 else ''}")
+                    answer_text = (out.answer or "").strip()
+                    # Guard: some models emit "__NO_ANSWER__" as a sentinel when
+                    # they see an attached artifact but don't know they should
+                    # synthesize from it.  Inject a [STOP] hint so the next
+                    # iteration forces the model to answer from the artifact.
+                    if answer_text == "__NO_ANSWER__":
+                        print(f"  [decision] no-answer sentinel — injecting STOP hint")
+                        history.append(
+                            {
+                                "iter": it,
+                                "kind": "action",
+                                "goal_id": goal.id,
+                                "tool": "SYSTEM",
+                                "arguments": {},
+                                "result_descriptor": (
+                                    "[STOP] The previous response was a placeholder. "
+                                    "ATTACHED ARTIFACTS contain the requested data. "
+                                    "Extract the information and produce a real answer "
+                                    "NOW — do NOT call any tool."
+                                ),
+                                "artifact_id": None,
+                            }
+                        )
+                        continue  # don't mark done; retry with the STOP hint visible
+                    preview = answer_text[:200]
+                    print(f"  [decision] ANSWER: {preview}{'...' if len(answer_text) > 200 else ''}")
                     history.append(
                         {
                             "iter": it,
                             "kind": "answer",
                             "goal_id": goal.id,
-                            "text": out.answer,
+                            "text": answer_text,
                         }
                     )
                     # Mark done immediately — don't rely on Perception to infer it
@@ -395,6 +423,7 @@ async def run(query: str) -> str:
     _no_real_answer = (
         answer == "Task completed with no answer recorded."
         or answer.startswith("Task completed. Last action:")
+        or answer.strip() == "__NO_ANSWER__"
     )
     if _no_real_answer and not fatal_error:
         try:

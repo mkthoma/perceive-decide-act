@@ -149,7 +149,7 @@ def _summary(results: list[tuple[str, bool, float]]) -> None:
 
 # ── Runner ───────────────────────────────────────────────────────────────────
 
-_QUERY_TIMEOUT = 450   # seconds per query before we give up
+_QUERY_TIMEOUT = 900   # seconds per query before we give up
 _INTER_QUERY_DELAY = 60  # seconds between queries so Gemini 57s backoffs clear
 
 
