@@ -144,17 +144,23 @@ def _final_answer_from(history: list[dict], goals: list[Goal]) -> str:
     if len(answer_by_goal) == 1:
         return next(iter(answer_by_goal.values()))
 
-    # Multiple goals answered.  Synthesis goals integrate sub-answers — when one
-    # is present, return only the last synthesis answer (skip raw sub-goal answers
-    # to avoid repetitive output with --- separators).
-    synthesis_answers: list[str] = []
-    for g in goals:
-        if g.id in answer_by_goal and _is_synthesis_goal(g.text):
-            synthesis_answers.append(answer_by_goal[g.id])
-    if synthesis_answers:
-        return synthesis_answers[-1]
+    # Multiple goals answered.
+    # Only the LAST answered goal in goal-list order can act as a synthesis gate.
+    # An intermediate "Extract birth date" goal must NOT suppress a later answer
+    # (e.g. "Identify three contributions") even if its text has a synthesis keyword.
+    last_answered_goal: Goal | None = None
+    for g in reversed(goals):
+        if g.id in answer_by_goal:
+            last_answered_goal = g
+            break
 
-    # No synthesis goal — join all distinct answers in goal order
+    if last_answered_goal and _is_synthesis_goal(last_answered_goal.text):
+        # Final goal is a true integration step — its answer already covers
+        # the sub-goal answers; return just that.
+        return answer_by_goal[last_answered_goal.id]
+
+    # No integrating final goal — join all answers in goal order.
+    # Use double newline (not ---) so the output reads as one cohesive response.
     ordered: list[str] = []
     seen: set[str] = set()
     for g in goals:
@@ -166,7 +172,7 @@ def _final_answer_from(history: list[dict], goals: list[Goal]) -> str:
         if gid not in seen:
             ordered.append(ans)
 
-    return "\n\n---\n\n".join(ordered)
+    return "\n\n".join(ordered)
 
 
 def _print_goals(goals: list[Goal]) -> None:
@@ -283,6 +289,29 @@ async def run(query: str) -> str:
                                         f"({len(raw):,} bytes)"
                                     )
                                     break
+
+                # For non-synthesis goals that follow an acquisition goal (e.g.
+                # "Extract birth date from the fetched content"), attach the most
+                # recent run artifact so Decision can answer without calling
+                # read_file on an art: handle.  Only fires when no artifact has
+                # been attached yet and there IS a completed acquisition goal in
+                # this run that produced an artifact.
+                if (
+                    not attached
+                    and not _is_acquisition_goal(goal.text)
+                    and any(
+                        _is_acquisition_goal(g.text) and g.done
+                        for g in prior_goals
+                        if g.id != goal.id
+                    )
+                ):
+                    for h in history:
+                        art_id = h.get("artifact_id")
+                        if art_id and artifacts.exists(art_id):
+                            raw = artifacts.get_bytes(art_id)
+                            attached.append((art_id, raw))
+                            print(f"  [context-attach] {art_id} ({len(raw):,} bytes)")
+                            break
 
                 # ── Decision ───────────────────────────────────────────── #
                 try:
