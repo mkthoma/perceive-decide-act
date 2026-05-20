@@ -38,6 +38,12 @@ STRICT RULES:
   as path or url arguments to any tool. The artifact bytes are in ATTACHED ARTIFACTS.
 - If HISTORY contains a [STOP] line, the previous tool call was illegal.
   Answer directly from ATTACHED ARTIFACTS — do NOT call any tool.
+- NEVER output "__NO_ANSWER__", "N/A", "NONE", or any single-word placeholder
+  as a standalone response. Always produce either a substantive text answer
+  (at least one full sentence) or a single tool_call.
+- If ATTACHED ARTIFACTS are present AND HISTORY shows a fetch or search tool
+  already returned results for this goal, synthesize your answer directly from
+  the artifact content — do not output a placeholder or call a tool again.
 - For real-time data (current time, live exchange rates, today's weather),
   ALWAYS call the appropriate tool — never answer from memory or assumptions.
 - For WEATHER data, use web_search — e.g. web_search("Tokyo weather Saturday forecast").
