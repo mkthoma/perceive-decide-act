@@ -56,6 +56,12 @@ RULES:
   Do not guess or invent an index.
 - Mark a goal done ONLY if HISTORY contains an action or answer that directly
   satisfies it.
+- MEMORY WRITES: If the query uses words like "remember", "save", "store",
+  "note", "record", or "keep" to ask that a specific fact be retained, you MUST
+  include a goal to durably save that fact.  Example goal text:
+    "Save mom's birthday (May 15, 2026) to memory/moms_birthday.txt"
+  Place this memory-write goal FIRST so the fact is persisted before any
+  follow-up actions that depend on it.
 - Return ONLY valid JSON matching the schema. No prose or commentary."""
 
 

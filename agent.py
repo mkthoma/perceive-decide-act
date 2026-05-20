@@ -51,6 +51,11 @@ _SYNTHESIS_KW = frozenset(
     "analyze analyse collate distil distill".split()
 )
 
+# Words that signal the user wants to persist a fact durably to disk.
+_MEMORY_WRITE_KW = frozenset(
+    "remember save store persist record note keep memorize memorise".split()
+)
+
 # First-word verbs that mean "go get the data" — goal is satisfied by a
 # successful tool call alone, no textual answer needed.
 # Exclude "check" (implies verify/report) and "find" (implies selection).
@@ -113,6 +118,21 @@ def _is_acquisition_goal(text: str) -> bool:
         and not (_SYNTHESIS_KW & set(words))
         and not (_ANSWER_MARKERS & set(words))
     )
+
+
+def _has_memory_write_intent(query: str) -> bool:
+    """True when the query asks to persist a fact to durable storage."""
+    words = set(query.lower().split())
+    return bool(words & _MEMORY_WRITE_KW)
+
+
+def _has_memory_write_goal(goals: list[Goal]) -> bool:
+    """True when at least one goal is a durable memory-write step."""
+    for g in goals:
+        lower = g.text.lower()
+        if any(kw in lower for kw in ("memory/", "create_file", "save", "store", "persist", "record")):
+            return True
+    return False
 
 
 def _final_answer_from(history: list[dict], goals: list[Goal]) -> str:
@@ -237,6 +257,24 @@ async def run(query: str) -> str:
                     # the task is already complete before any work this run.
                     for g in prior_goals:
                         g.done = False
+
+                    # Safety net: if the query has memory-write intent but
+                    # Perception produced no durable-save goal, inject one at
+                    # the front so the fact is persisted via create_file.
+                    if (
+                        _has_memory_write_intent(query)
+                        and not _has_memory_write_goal(prior_goals)
+                    ):
+                        # Use the first sentence of the query as the fact
+                        # descriptor (strip trailing filler phrases).
+                        _fact = query.split(".")[0].strip()
+                        save_goal = Goal(
+                            id=uuid.uuid4().hex[:8],
+                            text=f"Save fact to memory/ with create_file: {_fact}",
+                            done=False,
+                        )
+                        prior_goals.insert(0, save_goal)
+                        print(f"  [agent] injected memory-write goal: {save_goal.text}")
                 else:
                     # Reuse prior_goals directly — no LLM call needed.
                     obs = Observation(goals=list(prior_goals))
