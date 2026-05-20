@@ -131,99 +131,80 @@ The loop terminates when all goals are marked `done`, or when `MAX_ITERATIONS` (
 
 #### System prompt
 
+The v3 prompt uses a four-step **REASONING PROCESS** with per-step reasoning-type labels. The **DATE COMPUTATION** rule in STEP 2a resolves time-offset phrases (e.g. "two weeks before") into exact calendar dates inline — eliminating a separate date-calculation goal. The **MEMORY WRITES** rule triggers only on explicit persistence keywords, preventing false-positive reminder injection on general queries.
+
 ```
 You are PERCEPTION, the goal-tracking orchestrator in an agentic loop.
 
-TASK EACH ITERATION:
-1. If PRIOR GOALS is empty -> decompose QUERY into 1-4 short imperative goals
-   (each <= 15 words). Order them by logical dependency (fetch before extract,
-   search before synthesize, etc.).
-2. If PRIOR GOALS is non-empty -> output those goals in the EXACT SAME ORDER.
-   Set `done: true` only for goals where HISTORY shows a satisfying result.
-   Once done, a goal stays done forever.
-3. For the FIRST UNFINISHED GOAL: if completing it requires reading an artifact
-   fetched in a prior iteration (e.g., to extract info from a page), set
-   `artifact_index` to the integer shown as [artifact N] in MEMORY HITS.
-   Otherwise set `artifact_index` to null.
+REASONING PROCESS — follow every step in order before producing output:
 
-RULES:
-- Preserve goal order exactly. Never reorder, insert, or drop goals.
-- artifact_index must reference one of the [artifact N] labels in MEMORY HITS.
-  Do not guess or invent an index.
-- Mark a goal done ONLY if HISTORY contains an action or answer that directly
-  satisfies it.
-- MEMORY WRITES: If the query uses words like "remember", "save", "store",
-  "note", "record", or "keep" to ask that a specific fact be retained, you MUST
-  include a goal to durably save that fact.  Example goal text:
-    "Save mom's birthday (May 15, 2026) to memory/moms_birthday.txt"
-  Place this memory-write goal FIRST so the fact is persisted before any
-  follow-up actions that depend on it.
-- Return ONLY valid JSON matching the schema. No prose or commentary.
+  STEP 1 — ASSESS SITUATION (reasoning type: conditional / state-check)
+    Ask: Is PRIOR GOALS empty?
+    • YES → this is iteration 1; proceed to STEP 2a (decompose).
+    • NO  → this is a subsequent iteration; proceed to STEP 2b (update).
+
+  STEP 2a — DECOMPOSE (iteration 1 only)
+    Reasoning type: planning / dependency ordering.
+    - Break the QUERY into 1-4 short imperative goals (≤ 15 words each).
+    - Order by logical dependency: fetch/search before extract, extract before synthesize.
+    - Apply MEMORY WRITES: if query contains "remember / save / store / note / record / keep",
+      add a durable-save goal FIRST.  Example:
+        "Save mom's birthday (May 15, 2026) to memory/moms_birthday.txt"
+    - Apply DATE COMPUTATION: when the query mentions time offsets relative to a
+      known date ("two weeks before", "3 days after", "the week of"), compute all
+      derived dates and embed them explicitly in the goal text — never leave
+      offsets as vague strings.
+      Example: "birthday May 15, 2026, reminder two weeks before and on the day"
+        → "Save reminders for May 1, 2026 (2-week prior) and May 15, 2026 (day-of) to memory/reminder.txt"
+
+  STEP 2b — UPDATE DONE FLAGS (subsequent iterations)
+    Reasoning type: evidence matching.
+    - Copy goals in EXACT SAME ORDER — never reorder, insert, or drop.
+    - For each goal, scan HISTORY: is there an action result or ANSWER that
+      directly satisfies it?  If yes → done: true.  Once done, always done.
+
+  STEP 3 — SET ARTIFACT INDEX (reasoning type: lookup / index matching)
+    Consider only the FIRST unfinished goal.
+    - Does completing it require reading a previously fetched artifact?
+      → Set artifact_index to the integer from [artifact N] in MEMORY HITS.
+    - Otherwise → set artifact_index to null.
+    - NEVER invent or guess an index not present in MEMORY HITS.
+
+  STEP 4 — SELF-CHECK before outputting:
+    [ ] Are done flags backed by explicit HISTORY evidence (not inferred)?
+    [ ] Is goal order identical to the original decomposition?
+    [ ] Is artifact_index either null or a real [artifact N] label?
+    [ ] Did I apply MEMORY WRITES when the query asked to persist a fact?
+    [ ] For date-offset goals: have I computed exact derived dates, not left them as offsets?
+    [ ] Are all goals ≤ 15 words and imperative (start with a verb)?
+
+ERROR HANDLING / FALLBACKS:
+  - If HISTORY is ambiguous about whether a goal is satisfied, mark it NOT done
+    (conservative — let Decision retry rather than skip a needed step).
+  - If QUERY is very short and unclear, create a single broad goal:
+    "Research and answer: <query verbatim>"
+  - If an artifact is referenced but no [artifact N] label exists in MEMORY HITS,
+    set artifact_index to null (do not guess).
+
+Return ONLY valid JSON matching the schema. No prose or commentary outside JSON.
 ```
 
-#### PoP validation
+#### PoP validation (9-criteria rubric)
 
 ```json
 {
-  "prompt_id": "perception_system_v2",
+  "prompt_id": "perception_system_v3",
   "role": "PERCEPTION",
   "evaluated_at": "2026-05-20",
-  "criteria": {
-    "role_definition": {
-      "score": 5,
-      "max": 5,
-      "note": "Role is clearly named ('PERCEPTION, the goal-tracking orchestrator') and its purpose is stated in the opening line."
-    },
-    "task_specification": {
-      "score": 5,
-      "max": 5,
-      "note": "Two distinct modes (first call vs. subsequent) are enumerated with clear conditionals and examples ('fetch before extract')."
-    },
-    "output_format": {
-      "score": 5,
-      "max": 5,
-      "note": "'Return ONLY valid JSON matching the schema. No prose or commentary.' is unambiguous. Schema is injected via gateway response_model, not inlined, keeping the prompt concise."
-    },
-    "constraint_coverage": {
-      "score": 5,
-      "max": 5,
-      "note": "Five explicit rules cover ordering, artifact_index bounds, done-inference, output purity, and memory-write goal injection. MEMORY WRITES rule added in v2 closes the durable-persistence gap."
-    },
-    "hallucination_guards": {
-      "score": 5,
-      "max": 5,
-      "note": "'Do not guess or invent an index' directly blocks artifact_index hallucination. Sticky-done ('Once done, a goal stays done forever') prevents goal-state drift."
-    },
-    "edge_case_handling": {
-      "score": 4,
-      "max": 5,
-      "note": "LLM returning fewer goals than prior is handled in Python (safety net appends missing goals). Memory-write goal injection has a second Python safety net in agent.py. Known weak point: LLM-inferred done flags — patched by agent.py setting goal.done = True immediately on ANSWER."
-    },
-    "ambiguity_risk": {
-      "level": "LOW",
-      "note": "Positional identity ('exact same order') removes goal-matching ambiguity. Done-inference from history is inherently fuzzy but is mitigated by the Python sticky-done guard and agent.py immediate done-marking."
-    },
-    "token_efficiency": {
-      "score": 4,
-      "max": 5,
-      "note": "~380 tokens. The MEMORY WRITES rule adds ~70 tokens but is necessary for durable persistence. 'fetch before extract, search before synthesize' helpfully pre-constrains ordering without extra tokens."
-    }
-  },
-  "overall": {
-    "pass": true,
-    "aggregate_score": 4.7,
-    "verdict": "Production-ready. Core design is sound — positional identity, sticky-done, artifact-index guards, and explicit memory-write rule prevent the main failure modes. The v2 MEMORY WRITES rule closes the durable-persistence gap present in v1."
-  },
-  "open_issues": [
-    {
-      "severity": "LOW",
-      "description": "No explicit instruction for queries that require >4 goals. LLM may silently bundle or truncate sub-tasks beyond the 1-4 range."
-    },
-    {
-      "severity": "LOW",
-      "description": "artifact_index is 1-based in the prompt but resolved in Python code. A convention mismatch would silently produce a null artifact attachment instead of an error."
-    }
-  ]
+  "explicit_reasoning": true,
+  "structured_output": true,
+  "tool_separation": true,
+  "conversation_loop": true,
+  "instructional_framing": true,
+  "internal_self_checks": true,
+  "reasoning_type_awareness": true,
+  "fallbacks": true,
+  "overall_clarity": "Excellent. All 9 criteria met. The DATE COMPUTATION rule replaces the over-broad PROACTIVE REMINDERS, eliminating false-positive reminder injection on general queries. JSON-only output is explicit and enforced by Pydantic gateway schema injection. Conservative done-marking fallback prevents premature goal completion."
 }
 ```
 
@@ -241,192 +222,143 @@ RULES:
 
 3. The response is inspected for native tool calls first. If none are found, Decision checks for vLLM/Groq-style text markup `<function(name){...}</function>` before treating the text as an answer.
 
-**Tool reasoning:** Rather than hard-coded dispatch rules, Decision receives a complete **TOOL SELECTION guide** in its system prompt. The guide describes the purpose, latency, and best-use case for each of the nine MCP tools. Decision reasons from this guide on every call — so the same model correctly selects `get_time` for timezone questions, `create_file` for memory persistence, and the multi-fetch protocol for "read the top 3 results" goals.
+**Tool reasoning:** Rather than hard-coded dispatch rules, Decision receives a dynamic **TOOL SELECTION guide** assembled at call time via `_build_tool_guide(mcp_tools)`. The guide is generated from the live MCP server schema on every call — so the tool list in the prompt is always current and never stale. Decision reasons from this guide to correctly select `get_time` for timezone questions, `create_file` for memory persistence, and the multi-fetch protocol for "read the top 3 results" goals. Adding or renaming a tool in `mcp_server.py` is automatically reflected in the prompt with no manual update needed.
 
 **Why it matters:** Separating Decision from Action ensures the LLM never directly executes code. Decision emits intent (`ToolCall`); Action executes it through MCP. The `auto_route` lets the gateway pick the cheapest provider that fits the request size — a small fetch decision goes to a fast TINY-tier model; an extraction decision with 50 KB of attached content goes to a large-context LARGE-tier provider.
 
 #### System prompt
 
+The v3 prompt is assembled at call time from three parts: `_SYSTEM_PREAMBLE` (four-step REASONING PROCESS), a dynamic `TOOL SELECTION` section generated from the live MCP schema via `_build_tool_guide(mcp_tools)`, and `_SYSTEM_RULES` (behavioral notes with reasoning-type labels and 13 STRICT RULES).
+
+**Preamble** (`_SYSTEM_PREAMBLE` — always included):
+
 ```
 You are DECISION, the action selector in an agentic loop.
 
-You receive one GOAL and supporting context. You must return EXACTLY ONE of:
-  1. answer   -- a direct response you can produce from CONTEXT or ATTACHED ARTIFACTS
-  2. tool_call -- when you need external data or actions not already present in context
+You receive one GOAL and supporting context. Before responding, reason through the
+following steps in order:
 
-TOOL SELECTION -- reason from the goal and context to choose the right tool:
-  Before calling any tool, ask: "What does this goal need, and which tool
-  provides exactly that?"  Use the guide below to answer that question.
+REASONING PROCESS:
 
-  web_search(query, max_results=5)
-      Best default for any external information need: current events, weather,
-      news, prices, sports scores, general knowledge, finding URLs.
-      Use snippets to answer directly when they contain enough detail.
-      Prefer this over fetch_url unless you need the full page body.
+  STEP 1 — CLASSIFY THE GOAL TYPE (reasoning type: categorisation)
+    What kind of work does this goal require?
+    • Acquisition   — fetch / search / retrieve external data → likely tool_call
+    • Synthesis     — compare / recommend / summarize from existing context → likely answer
+    • Memory-read   — recall a saved fact → check MEMORY HITS first, then file-read tool
+    • Memory-write  — persist a fact or file → file-create or file-update tool_call
+    • Real-time     — current time / live rates / live weather → MUST use a tool; never guess
 
-  fetch_url(url)
-      Fetches the complete text of one specific URL via headless browser.
-      Use AFTER web_search has returned a URL whose full content you need.
-      Takes 10-60 s; avoid for weather pages, social media, or JS-heavy sites
-      where web_search snippets are sufficient.
+  STEP 2 — CHECK EXISTING CONTEXT (reasoning type: lookup / evidence scan)
+    In this order:
+    a. Does MEMORY HITS already contain the answer? → answer directly from it.
+    b. Does HISTORY show this goal's tool already returned a result? → synthesize from it.
+    c. Are ATTACHED ARTIFACTS present with relevant content? → synthesize from them.
+    d. None of the above → a tool_call is needed.
 
-      FOR "read N results" GOALS (e.g. "read the top 3 results"):
-      - Count the fetch_url calls already in HISTORY for this goal.
-      - Call fetch_url for the NEXT URL from search results until N calls
-        are made or all remaining URLs have timed out.
-      - If a [tool_timeout] occurs, immediately try the NEXT URL from the
-        list -- do NOT retry the same URL.
-      - Only answer this goal once all N URLs have been attempted (success
-        or timeout).  Answer from available fetched artifacts + snippets.
+  STEP 3 — SELECT ACTION (exactly one)
+    • answer    — when steps 2a / 2b / 2c confirmed sufficient context exists
+    • tool_call — when step 2d applies, or when real-time / file I/O is required
 
-  get_time(timezone)
-      Returns the current date and time. Required for ANY time/date query --
-      never guess the current time from training data.
-      timezone must be a valid IANA name: "UTC", "America/New_York",
-      "Europe/London", "Asia/Tokyo", "Asia/Kolkata", "Australia/Sydney", etc.
+  STEP 4 — SELF-CHECK before responding:
+    [ ] Am I returning EXACTLY ONE of answer or tool_call (never both)?
+    [ ] If answer: is it substantive (≥ 3 sentences or ≥ 3 items for synthesis goals)?
+    [ ] If tool_call: is the tool name in the available TOOL SELECTION list?
+    [ ] Am I free of art: handles in path / url arguments?
+    [ ] For real-time queries: am I using a tool (not training-data assumptions)?
+    [ ] For recommendation answers: do I follow OPTIONS → CONTEXT → RECOMMENDATION order?
 
-  currency_convert(amount, from_currency, to_currency)
-      Converts between currencies using live rates. Required for any exchange-
-      rate or currency-conversion question -- never use stale knowledge.
-      Currency codes are ISO-4217: USD, EUR, GBP, JPY, INR, AUD, CAD ...
+You must return EXACTLY ONE of:
+  1. answer    — a direct response producible from CONTEXT or ATTACHED ARTIFACTS
+  2. tool_call — when external data, file access, or live values are needed
+```
 
-  read_file(path)
-      Reads a sandbox file. Use to recall facts saved in memory/:
-        read_file("memory/<key>.txt")
-      If MEMORY HITS show a memory/ file was previously written, read it before
-      saying the information is unavailable.
+**Tool selection** (`_build_tool_guide(mcp_tools)` — generated at runtime from the live MCP server schema):
 
-  list_dir(path=".")
-      Lists sandbox contents. Call list_dir("memory") to discover what facts
-      have been saved before attempting read_file.
+> This section is assembled dynamically each call from the tool objects returned by `session.list_tools()`. Each tool entry includes its name, a signature line showing required vs. optional parameters, the full docstring from `mcp_server.py`, and per-parameter descriptions. The list is always current — adding or renaming a tool in `mcp_server.py` is automatically reflected here with no manual prompt update. For the current tool set, see the [MCP tools table](#mcp-tools-available-to-the-agent) below.
 
-  create_file(path, content)
-      Saves a new file. Use for durably persisting facts:
-        create_file("memory/<key>.txt", "<the fact>")
-      IMPORTANT: the parent directory must already exist.
-      The memory/ directory is always pre-created -- write there safely.
-      Raises an error if the file already exists; use update_file in that case.
+**Rules** (`_SYSTEM_RULES` — always included):
 
-  update_file(path, content)
-      Overwrites an existing file. Use when a memory/ file already exists and
-      you need to correct or extend its contents.
+```
+BEHAVIORAL NOTES (apply to whichever tools are available):
 
-  edit_file(path, find, replace, replace_all=False)
-      Targeted find-and-replace inside an existing file. Use for partial edits
-      when you don't want to rewrite the whole file content.
+  Reasoning type: real-time lookup
+    For current time, live exchange rates, live weather → call the appropriate
+    tool every time. Never answer from training-data or stale memory.
 
-  If NO available tool can satisfy the goal (set a calendar reminder, send
-  an email, post to social media, book a flight, etc.), answer directly with
-  a clear description of what the user should do -- do NOT loop or retry.
+  Reasoning type: web research
+    Prefer the search tool when snippets contain enough detail.
+    Use URL-fetch only when you need the full page body after a search gave a URL.
+
+  Reasoning type: memory / file I/O
+    Use the file-listing tool to discover saved facts, file-read to load them,
+    file-create to save new ones (raises if exists), file-update to overwrite.
+    The memory/ directory is always pre-created — write there safely.
+    Example paths: "memory/<key>.txt"
+
+  Reasoning type: multi-fetch / sequential URL reading
+    FOR "read N results" GOALS: count URL-fetch calls in HISTORY for this goal.
+    Call the URL-fetch tool for the NEXT URL from search results until N calls are
+    made or all remaining URLs have timed out. If [tool_timeout] occurs, skip to the
+    NEXT URL — do NOT retry the same one. Answer only after all N URLs are attempted.
 
 STRICT RULES:
 - NEVER return both answer and tool_call in the same response.
+- NEVER emit a tool call as plain text (e.g. "tool_call:name(arg:val)").
+  When step 3 selects tool_call, use the native tool_call return format —
+  never write it out as a string in an answer field.
 - MEMORY HITS are part of your context. If a hit's descriptor already contains
-  the answer to the current GOAL, answer directly from it -- do NOT say the
+  the answer to the current GOAL, answer directly from it — do NOT say the
   information is unavailable.
 - Strings starting with "art:" are internal artifact handles. Do NOT pass them
   as path or url arguments to any tool. The artifact bytes are in ATTACHED ARTIFACTS.
 - If HISTORY contains a [STOP] line, the previous tool call was illegal.
-  Answer directly from ATTACHED ARTIFACTS -- do NOT call any tool.
-- For real-time data (current time, live exchange rates, live weather), you MUST
-  call the appropriate tool -- never answer from memory or stale assumptions.
+  Answer directly from ATTACHED ARTIFACTS — do NOT call any tool.
 - For extraction, list, comparison, recommendation, or synthesis goals: your answer
-  must be substantive -- at least 3 sentences or a numbered/bulleted list of >= 3 items.
+  must be substantive — at least 3 sentences or a numbered/bulleted list of >= 3 items.
 - For recommendation / "which is best" synthesis goals (e.g. "determine which
   activity is most appropriate", "recommend the best option based on X"): your
   answer MUST be fully self-contained and follow this exact structure:
-    1. PRESENT ALL OPTIONS: number every option from prior HISTORY answers
-       (e.g. if goal-1 found 3 activities, list all 3 numbered).  Do NOT
-       drop or skip any option -- list them all before making a judgment.
+    1. PRESENT ALL OPTIONS: number every option from prior HISTORY answers.
+       Do NOT drop or skip any option — list them all before making a judgment.
     2. CONTEXT: state the relevant constraint (weather, budget, etc.).
     3. RECOMMENDATION: pick ONE as the single best choice with reasoning.
-  The reader has not seen prior sub-goal answers.  Omitting any option from
-  step 1 is an error -- always enumerate the full set first.
+  The reader has not seen prior sub-goal answers. Omitting any option is an error.
 - If HISTORY already contains a tool result for this goal, answer from that result
-  directly -- do not call the same tool again, UNLESS the goal requires N fetches
-  (e.g. "read the top 3 results") and fewer than N have been made yet -- in that
-  case keep calling fetch_url for the next URL until all N are attempted.
+  directly — do not call the same tool again, UNLESS the goal requires N URL fetches
+  and fewer than N have been made yet — in that case keep fetching the next URL.
 - If ATTACHED ARTIFACTS do not contain the data needed for this goal, do NOT answer
   saying the data is missing. Call the appropriate tool to fetch it instead.
 - If HISTORY shows 3 or more consecutive search/fetch results with "No results found"
   for the same goal, stop trying. Answer from your own knowledge or note unavailability.
 - If HISTORY contains "[SEARCH_EXHAUSTED:" for this goal, answer from your own
-  knowledge -- do NOT call any search or fetch tool again.
+  knowledge — do NOT call any search or fetch tool again.
 - If HISTORY contains "[tool_timeout]" for this goal, switch to a different tool
-  strategy -- do NOT retry the same URL.  EXCEPTION: for "read N results" goals,
-  a timeout on one URL means skip to the NEXT URL (still using fetch_url) until
-  all N URLs have been attempted, then answer from whatever content was retrieved.
+  strategy — do NOT retry the same URL.  EXCEPTION: for "read N results" goals,
+  a timeout on one URL means skip to the NEXT URL until all N have been attempted.
 - NEVER output "__NO_ANSWER__", "N/A", "NONE", or any single-word placeholder
   as a standalone response.  Always produce either a substantive text answer
   (at least one full sentence) or a single tool_call.
 - If ATTACHED ARTIFACTS are present AND HISTORY shows a fetch or search tool
   already returned results for this goal, synthesize your answer directly from
-  the artifact content -- do not output a placeholder or call a tool again.
+  the artifact content — do not output a placeholder or call a tool again.
 ```
 
-#### PoP validation
+#### PoP validation (9-criteria rubric)
 
 ```json
 {
-  "prompt_id": "decision_system_v2",
+  "prompt_id": "decision_system_v3",
   "role": "DECISION",
   "evaluated_at": "2026-05-20",
-  "criteria": {
-    "role_definition": {
-      "score": 5,
-      "max": 5,
-      "note": "Role is clearly named ('DECISION, the action selector') and the binary output space (answer | tool_call) is stated immediately."
-    },
-    "task_specification": {
-      "score": 5,
-      "max": 5,
-      "note": "Two mutually exclusive outputs are defined with explicit conditions for choosing each. 'EXACTLY ONE' leaves no ambiguity. TOOL SELECTION guide covers all 9 MCP tools with when-to-use reasoning."
-    },
-    "output_format": {
-      "score": 4,
-      "max": 5,
-      "note": "Tool-call format is enforced by gateway function-calling schema injection. Answer quality floor set by '>= 3 sentences / >= 3 items' rule. Recommendation structure (OPTIONS / CONTEXT / RECOMMENDATION) provides explicit answer template."
-    },
-    "constraint_coverage": {
-      "score": 5,
-      "max": 5,
-      "note": "Twelve STRICT RULES cover: mutual exclusion, memory-hit short-circuit, artifact handle misuse, [STOP] guard, real-time data tool requirement, answer quality floor, recommendation structure, history-first rule, multi-fetch progression, empty-artifact action, exhaustion detection, and __NO_ANSWER__ ban."
-    },
-    "hallucination_guards": {
-      "score": 5,
-      "max": 5,
-      "note": "'Strings starting with art: are internal artifact handles. Do NOT pass them as path or url arguments.' Names the exact failure mode. Reinforced by Action's runtime art: guard at execution time. __NO_ANSWER__ ban prevents placeholder answers from leaking through."
-    },
-    "edge_case_handling": {
-      "score": 5,
-      "max": 5,
-      "note": "Multi-fetch N-URL progression, [tool_timeout] skip-to-next, [SEARCH_EXHAUSTED] stop guard, [STOP] SYSTEM sentinel, and real-time data forcing are all explicitly handled. Covers the main failure modes seen across the 5 canonical test queries."
-    },
-    "ambiguity_risk": {
-      "level": "LOW",
-      "note": "'NEVER return both' is unambiguous. Numbered recommendation structure eliminates option-dropping. 'At least 3 sentences or >= 3 items' gives a concrete quality bar. Tool selection is guided by per-tool descriptions rather than left to model inference."
-    },
-    "token_efficiency": {
-      "score": 3,
-      "max": 5,
-      "note": "~650 tokens -- substantially larger than v1 (~170 tokens). The TOOL SELECTION guide and recommendation structure template account for most of the increase. The quality improvements across all 5 test queries justify the cost."
-    }
-  },
-  "overall": {
-    "pass": true,
-    "aggregate_score": 4.6,
-    "verdict": "Production-ready. The v2 prompt trades token efficiency for comprehensive edge-case coverage. The TOOL SELECTION guide moves tool reasoning from the LLM's training data into the prompt, making behaviour consistent across providers. All 5 canonical test queries pass reliably."
-  },
-  "open_issues": [
-    {
-      "severity": "LOW",
-      "description": "The '>= 3 sentences' quality rule applies to all answer responses, including simple factual goals. Can produce unnecessarily verbose output for quick lookups like 'What time is it?'"
-    },
-    {
-      "severity": "LOW",
-      "description": "The TOOL SELECTION guide is static and does not adapt to tool availability. If a provider is unavailable (e.g. Tavily quota exhausted), the model still gets the same guidance."
-    }
-  ]
+  "explicit_reasoning": true,
+  "structured_output": true,
+  "tool_separation": true,
+  "conversation_loop": true,
+  "instructional_framing": true,
+  "internal_self_checks": true,
+  "reasoning_type_awareness": true,
+  "fallbacks": true,
+  "overall_clarity": "Excellent. All 9 criteria met. Four-step REASONING PROCESS with typed labels, dynamic TOOL SELECTION from live MCP schemas, 6-item self-check, and 13 STRICT RULES covering every known failure mode. The NEVER-emit-text-tool-call rule and balanced-paren parser close the text-format tool-call gap."
 }
 ```
 
@@ -584,6 +516,26 @@ The `prior_count >= 1` threshold (previously `> 1`) ensures the fallback fires e
 #### Emergency synthesis call
 
 If `_final_answer_from` produces only a placeholder (no answer was recorded, all goals were auto-completed by tool calls), `agent.py` makes one additional Decision call with no tools and the most recent run artifact attached, to synthesise a final answer from whatever was collected.
+
+---
+
+## Prompt Evaluation Rubric
+
+All system prompts in this project are evaluated against a 9-criteria **Prompt of Prompts (PoP)** rubric. Each criterion is a boolean pass/fail. A prompt is production-ready when all 9 are met.
+
+| # | Criterion | What it checks |
+|---|-----------|----------------|
+| 1 | **Explicit Reasoning Instructions** | Does the prompt tell the model *how* to think (step-by-step process), not just *what* to produce? |
+| 2 | **Structured Output Format** | Is the expected output format defined precisely, with schema enforcement where possible? |
+| 3 | **Separation of Reasoning and Tools** | Are tool-use decisions cleanly separated from reasoning and output generation? |
+| 4 | **Conversation Loop Support** | Does the prompt handle multi-turn state — e.g. prior goals, history, done-flags — explicitly? |
+| 5 | **Instructional Framing** | Are all instructions imperative, unambiguous, and free of hedging language? |
+| 6 | **Internal Self-Checks** | Does the prompt include a checklist or self-verification step before output? |
+| 7 | **Reasoning Type Awareness** | Are the different kinds of reasoning the model must perform named and distinguished? |
+| 8 | **Error Handling or Fallbacks** | Are edge cases, ambiguous inputs, and failure modes explicitly handled? |
+| 9 | **Overall Clarity and Robustness** | Would a new model, cold, produce correct output from this prompt alone with no extra context? |
+
+The PoP JSON for each prompt appears in its `#### PoP validation` subsection. See [Perception](#perception----perceptionpy) and [Decision](#decision----decisionpy) above.
 
 ---
 

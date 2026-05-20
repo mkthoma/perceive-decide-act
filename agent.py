@@ -81,6 +81,11 @@ _ACQUISITION_VERBS = frozenset(
 # just because they returned a value (e.g. get_time for "search weather" goal).
 _AUTO_DONE_TOOLS = frozenset({"web_search", "fetch_url", "read_file", "list_dir"})
 
+# Maximum number of MCP subprocess restarts per run.
+# Each restart is triggered by a [tool_timeout] — the old subprocess is discarded
+# (killing the stalled crawl4ai/HTTP request) and a fresh one is spawned.
+_MAX_SESSION_RESTARTS = 3
+
 # Words that signal an answer is expected — goal is NOT purely data retrieval.
 # "Fetch https://... and tell me his birth date" needs an ANSWER after the fetch.
 _ANSWER_MARKERS = frozenset(
@@ -257,246 +262,217 @@ async def run(query: str) -> str:
 
     fatal_error: str | None = None
 
-    async with stdio_client(_MCP_PARAMS) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tools_result = await session.list_tools()
-            mcp_tools = _mcp_tools_for_decision(tools_result.tools)
+    # These three variables live outside the MCP session so they survive
+    # reconnects.  `it` resumes from where the timed-out iteration left off;
+    # `mcp_tools` is re-fetched from the fresh subprocess each time.
+    it = 1
+    mcp_tools: list[dict] = []
+    _session_restarts = 0
 
-            for it in range(1, MAX_ITERATIONS + 1):
-                # Fast-path exit: if all goals are already marked done from
-                # the previous iteration, skip the Perception LLM call and
-                # break immediately — saves one gateway round-trip per query.
-                if it > 1 and prior_goals and all(g.done for g in prior_goals):
-                    print("\n[done] all goals satisfied")
-                    break
+    while True:  # outer reconnect loop — re-enters on tool timeout
+        _needs_reconnect = False
 
-                # ── Memory ─────────────────────────────────────────────── #
-                hits = memory.read(query, history)
+        async with stdio_client(_MCP_PARAMS) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools_result = await session.list_tools()
+                mcp_tools = _mcp_tools_for_decision(tools_result.tools)
 
-                # ── Perception ─────────────────────────────────────────── #
-                # Only call Perception on the first iteration to decompose
-                # the query into goals.  On subsequent iterations the done
-                # flags are already managed by agent.py (set immediately when
-                # Decision answers or a tool auto-completes an acquisition
-                # goal), so another LLM call would return the same goal list
-                # unchanged — wasteful when free-tier providers are scarce.
-                if it == 1:
+                while it <= MAX_ITERATIONS:
+                    # Fast-path exit: if all goals are already marked done from
+                    # the previous iteration, skip the Perception LLM call and
+                    # break immediately — saves one gateway round-trip per query.
+                    if it > 1 and prior_goals and all(g.done for g in prior_goals):
+                        print("\n[done] all goals satisfied")
+                        break
+
+                    # ── Memory ─────────────────────────────────────────────── #
+                    hits = memory.read(query, history)
+
+                    # ── Perception ─────────────────────────────────────────── #
+                    # Only call Perception on the first iteration to decompose
+                    # the query into goals.  On subsequent iterations the done
+                    # flags are already managed by agent.py (set immediately when
+                    # Decision answers or a tool auto-completes an acquisition
+                    # goal), so another LLM call would return the same goal list
+                    # unchanged — wasteful when free-tier providers are scarce.
+                    if it == 1:
+                        try:
+                            obs = await perception.observe(
+                                query, hits, history, prior_goals, run_id
+                            )
+                        except Exception as exc:
+                            print(f"\n[agent] ERROR in perception: {exc}")
+                            fatal_error = str(exc)
+                            break
+                        prior_goals = obs.goals
+                        # Guard: memory hits from prior runs can make Gemini think
+                        # the task is already complete before any work this run.
+                        for g in prior_goals:
+                            g.done = False
+
+                        # Safety net: if the query has memory-write intent but
+                        # Perception produced no durable-save goal, inject one at
+                        # the front so the fact is persisted via create_file.
+                        if (
+                            _has_memory_write_intent(query)
+                            and not _has_memory_write_goal(prior_goals)
+                        ):
+                            # Use the first sentence of the query as the fact
+                            # descriptor (strip trailing filler phrases).
+                            _fact = query.split(".")[0].strip()
+                            save_goal = Goal(
+                                id=uuid.uuid4().hex[:8],
+                                text=f"Save fact to memory/ with create_file: {_fact}",
+                                done=False,
+                            )
+                            prior_goals.insert(0, save_goal)
+                            print(f"  [agent] injected memory-write goal: {save_goal.text}")
+
+                    else:
+                        # Reuse prior_goals directly — no LLM call needed.
+                        obs = Observation(goals=list(prior_goals))
+
+                    print(f"\n--- iter {it} ---")
+                    _print_goals(obs.goals)
+
+                    if obs.all_done:
+                        print("\n[done] all goals satisfied")
+                        break
+
+                    goal = obs.next_unfinished()
+                    if goal is None:
+                        break
+
+                    # ── Artifact attachment ─────────────────────────────────── #
+                    attached: list[tuple[str, bytes]] = []
+
+                    if goal.attach_artifact_id and artifacts.exists(goal.attach_artifact_id):
+                        raw = artifacts.get_bytes(goal.attach_artifact_id)
+                        attached.append((goal.attach_artifact_id, raw))
+                        print(f"  [attach] {goal.attach_artifact_id} ({len(raw):,} bytes)")
+
+                    # For synthesis goals attach ALL artifacts collected this run
+                    # (up to 3) so Decision has every piece of data it needs in one
+                    # call.  Falls back to keyword-filtered memory hits if the run
+                    # has produced no artifacts yet.
+                    if not attached and _is_synthesis_goal(goal.text):
+                        seen: set[str] = set()
+                        for h in history:
+                            art_id = h.get("artifact_id")
+                            if art_id and art_id not in seen and artifacts.exists(art_id):
+                                raw = artifacts.get_bytes(art_id)
+                                attached.append((art_id, raw))
+                                seen.add(art_id)
+                                print(f"  [force-attach] {art_id} ({len(raw):,} bytes)")
+                                if len(attached) >= 3:
+                                    break
+                        # Fallback: keyword-filtered memory hits
+                        if not attached:
+                            goal_words = set(goal.text.lower().split())
+                            for hit in reversed(hits):
+                                if hit.artifact_id and artifacts.exists(hit.artifact_id):
+                                    artifact_kw = set(getattr(hit, "keywords", []))
+                                    if not artifact_kw or (goal_words & artifact_kw):
+                                        raw = artifacts.get_bytes(hit.artifact_id)
+                                        attached.append((hit.artifact_id, raw))
+                                        print(
+                                            f"  [force-attach] {hit.artifact_id} "
+                                            f"({len(raw):,} bytes)"
+                                        )
+                                        break
+
+                    # For non-synthesis goals that follow an acquisition goal (e.g.
+                    # "Extract birth date from the fetched content"), attach the most
+                    # recent run artifact so Decision can answer without calling
+                    # read_file on an art: handle.  Only fires when no artifact has
+                    # been attached yet and there IS a completed acquisition goal in
+                    # this run that produced an artifact.
+                    if (
+                        not attached
+                        and not _is_acquisition_goal(goal.text)
+                        and any(
+                            _is_acquisition_goal(g.text) and g.done
+                            for g in prior_goals
+                            if g.id != goal.id
+                        )
+                    ):
+                        for h in history:
+                            art_id = h.get("artifact_id")
+                            if art_id and artifacts.exists(art_id):
+                                raw = artifacts.get_bytes(art_id)
+                                attached.append((art_id, raw))
+                                print(f"  [context-attach] {art_id} ({len(raw):,} bytes)")
+                                break
+
+                    # ── Decision ───────────────────────────────────────────── #
                     try:
-                        obs = await perception.observe(
-                            query, hits, history, prior_goals, run_id
+                        out = await decision.next_step(
+                            goal, hits, attached, history, mcp_tools
                         )
                     except Exception as exc:
-                        print(f"\n[agent] ERROR in perception: {exc}")
+                        print(f"\n[agent] ERROR in decision: {exc}")
                         fatal_error = str(exc)
                         break
-                    prior_goals = obs.goals
-                    # Guard: memory hits from prior runs can make Gemini think
-                    # the task is already complete before any work this run.
-                    for g in prior_goals:
-                        g.done = False
 
-                    # Safety net: if the query has memory-write intent but
-                    # Perception produced no durable-save goal, inject one at
-                    # the front so the fact is persisted via create_file.
-                    if (
-                        _has_memory_write_intent(query)
-                        and not _has_memory_write_goal(prior_goals)
-                    ):
-                        # Use the first sentence of the query as the fact
-                        # descriptor (strip trailing filler phrases).
-                        _fact = query.split(".")[0].strip()
-                        save_goal = Goal(
-                            id=uuid.uuid4().hex[:8],
-                            text=f"Save fact to memory/ with create_file: {_fact}",
-                            done=False,
-                        )
-                        prior_goals.insert(0, save_goal)
-                        print(f"  [agent] injected memory-write goal: {save_goal.text}")
-                else:
-                    # Reuse prior_goals directly — no LLM call needed.
-                    obs = Observation(goals=list(prior_goals))
+                    if out.is_answer:
+                        answer_text = (out.answer or "").strip()
+                        preview = answer_text[:200]
+                        print(f"  [decision] ANSWER: {preview}{'...' if len(answer_text) > 200 else ''}")
 
-                print(f"\n--- iter {it} ---")
-                _print_goals(obs.goals)
+                        # Guard: some models emit __NO_ANSWER__ instead of extracting
+                        # data from attached artifacts.  Inject a STOP hint and retry.
+                        if "__NO_ANSWER__" in answer_text:
+                            print(f"  [decision] no-answer sentinel — injecting STOP hint")
+                            history.append(
+                                {
+                                    "iter": it,
+                                    "kind": "action",
+                                    "goal_id": goal.id,
+                                    "tool": "SYSTEM",
+                                    "arguments": {},
+                                    "result_descriptor": (
+                                        "[STOP] The previous response was a placeholder. "
+                                        "ATTACHED ARTIFACTS contain the requested data. "
+                                        "Extract the information and produce a real answer "
+                                        "NOW — do NOT call any tool."
+                                    ),
+                                    "artifact_id": None,
+                                }
+                            )
+                            it += 1
+                            continue
 
-                if obs.all_done:
-                    print("\n[done] all goals satisfied")
-                    break
-
-                goal = obs.next_unfinished()
-                if goal is None:
-                    break
-
-                # ── Artifact attachment ─────────────────────────────────── #
-                attached: list[tuple[str, bytes]] = []
-
-                if goal.attach_artifact_id and artifacts.exists(goal.attach_artifact_id):
-                    raw = artifacts.get_bytes(goal.attach_artifact_id)
-                    attached.append((goal.attach_artifact_id, raw))
-                    print(f"  [attach] {goal.attach_artifact_id} ({len(raw):,} bytes)")
-
-                # For synthesis goals attach ALL artifacts collected this run
-                # (up to 3) so Decision has every piece of data it needs in one
-                # call.  Falls back to keyword-filtered memory hits if the run
-                # has produced no artifacts yet.
-                if not attached and _is_synthesis_goal(goal.text):
-                    seen: set[str] = set()
-                    for h in history:
-                        art_id = h.get("artifact_id")
-                        if art_id and art_id not in seen and artifacts.exists(art_id):
-                            raw = artifacts.get_bytes(art_id)
-                            attached.append((art_id, raw))
-                            seen.add(art_id)
-                            print(f"  [force-attach] {art_id} ({len(raw):,} bytes)")
-                            if len(attached) >= 3:
-                                break
-                    # Fallback: keyword-filtered memory hits
-                    if not attached:
-                        goal_words = set(goal.text.lower().split())
-                        for hit in reversed(hits):
-                            if hit.artifact_id and artifacts.exists(hit.artifact_id):
-                                artifact_kw = set(getattr(hit, "keywords", []))
-                                if not artifact_kw or (goal_words & artifact_kw):
-                                    raw = artifacts.get_bytes(hit.artifact_id)
-                                    attached.append((hit.artifact_id, raw))
-                                    print(
-                                        f"  [force-attach] {hit.artifact_id} "
-                                        f"({len(raw):,} bytes)"
-                                    )
-                                    break
-
-                # For non-synthesis goals that follow an acquisition goal (e.g.
-                # "Extract birth date from the fetched content"), attach the most
-                # recent run artifact so Decision can answer without calling
-                # read_file on an art: handle.  Only fires when no artifact has
-                # been attached yet and there IS a completed acquisition goal in
-                # this run that produced an artifact.
-                if (
-                    not attached
-                    and not _is_acquisition_goal(goal.text)
-                    and any(
-                        _is_acquisition_goal(g.text) and g.done
-                        for g in prior_goals
-                        if g.id != goal.id
-                    )
-                ):
-                    for h in history:
-                        art_id = h.get("artifact_id")
-                        if art_id and artifacts.exists(art_id):
-                            raw = artifacts.get_bytes(art_id)
-                            attached.append((art_id, raw))
-                            print(f"  [context-attach] {art_id} ({len(raw):,} bytes)")
-                            break
-
-                # ── Decision ───────────────────────────────────────────── #
-                try:
-                    out = await decision.next_step(
-                        goal, hits, attached, history, mcp_tools
-                    )
-                except Exception as exc:
-                    print(f"\n[agent] ERROR in decision: {exc}")
-                    fatal_error = str(exc)
-                    break
-
-                if out.is_answer:
-                    answer_text = (out.answer or "").strip()
-                    preview = answer_text[:200]
-                    print(f"  [decision] ANSWER: {preview}{'...' if len(answer_text) > 200 else ''}")
-
-                    # Guard: some models emit __NO_ANSWER__ instead of extracting
-                    # data from attached artifacts.  Inject a STOP hint and retry.
-                    if "__NO_ANSWER__" in answer_text:
-                        print(f"  [decision] no-answer sentinel — injecting STOP hint")
                         history.append(
                             {
                                 "iter": it,
-                                "kind": "action",
+                                "kind": "answer",
                                 "goal_id": goal.id,
-                                "tool": "SYSTEM",
-                                "arguments": {},
-                                "result_descriptor": (
-                                    "[STOP] The previous response was a placeholder. "
-                                    "ATTACHED ARTIFACTS contain the requested data. "
-                                    "Extract the information and produce a real answer "
-                                    "NOW — do NOT call any tool."
-                                ),
-                                "artifact_id": None,
+                                "text": answer_text,
                             }
                         )
+                        # Mark done immediately — don't rely on Perception to infer it
+                        # from history. Sticky-done in Perception will preserve this.
+                        goal.done = True
+                        it += 1
                         continue
 
-                    history.append(
-                        {
-                            "iter": it,
-                            "kind": "answer",
-                            "goal_id": goal.id,
-                            "text": answer_text,
-                        }
-                    )
-                    # Mark done immediately — don't rely on Perception to infer it
-                    # from history. Sticky-done in Perception will preserve this.
-                    goal.done = True
-                    continue
+                    # ── Action ─────────────────────────────────────────────── #
+                    tc = out.tool_call
+                    assert tc is not None
+                    print(f"  [decision] TOOL_CALL: {tc.name}({tc.arguments})")
 
-                # ── Action ─────────────────────────────────────────────── #
-                tc = out.tool_call
-                assert tc is not None
-                print(f"  [decision] TOOL_CALL: {tc.name}({tc.arguments})")
+                    result_text, art_id = await action.execute(session, tc)
+                    print(f"  [action] -> {result_text[:120]}")
 
-                result_text, art_id = await action.execute(session, tc)
-                print(f"  [action] -> {result_text[:120]}")
-
-                # Auto-complete acquisition goals on successful tool execution.
-                # "Fetch the Wikipedia page" is done once fetch_url returns data;
-                # no LLM answer is needed. This prevents Decision from looping
-                # trying to re-read an artifact handle it can't use as a path.
-                # Only fire for data-retrieval tools — utility tools like get_time
-                # or currency_convert should not auto-complete a "search" goal
-                # just because they returned a value.
-                is_error = result_text.startswith("[") and (
-                    "error" in result_text[:80].lower()
-                    or "timeout" in result_text[:80].lower()
-                    or result_text.startswith("[STOP]")
-                )
-                is_empty = (
-                    "no results found" in result_text[:80].lower()
-                    or result_text.strip() in ("(empty directory)", "[]", "null", "")
-                )
-                if (not is_error and not is_empty
-                        and _is_acquisition_goal(goal.text)
-                        and tc.name in _AUTO_DONE_TOOLS):
-                    goal.done = True
-                    print(f"  [auto-done] acquisition goal satisfied by tool call")
-
-                # Hard-stop repeated empty searches: if the last 3 actions for
-                # this goal all returned "No results found", skip further tool
-                # calls and let Decision answer from its knowledge next iter.
-                if is_empty:
-                    recent_empty = sum(
-                        1 for h in history[-6:]
-                        if h.get("kind") == "action"
-                        and h.get("goal_id") == goal.id
-                        and (
-                            "no results found" in h.get("result_descriptor", "").lower()
-                            or h.get("result_descriptor", "").strip() in ("[]", "null", "")
-                        )
-                    )
-                    if recent_empty >= 2:
-                        print(f"  [no-search] 3+ empty results — skipping tool, forcing answer next iter")
-                        # Remove tools from mcp_tools for the NEXT decision call
-                        # by injecting a sentinel into history
-                        history.append(
-                            {
-                                "iter": it,
-                                "kind": "action",
-                                "goal_id": goal.id,
-                                "tool": tc.name,
-                                "arguments": tc.arguments,
-                                "result_descriptor": result_text[:300] + " [SEARCH_EXHAUSTED: web_search returned no results after 3 attempts. Do NOT call web_search again. Instead call fetch_url on official documentation or well-known resource URLs for this topic.]",
-                                "artifact_id": None,
-                            }
-                        )
+                    # ── Timeout → session poisoned, trigger reconnect ────────── #
+                    # When asyncio.wait_for cancels the client-side read, the MCP
+                    # subprocess keeps running (e.g. crawl4ai still fetching).
+                    # When it finishes it writes to the stdout pipe; the pipe buffer
+                    # fills; the server blocks; every subsequent call hangs at 30 s.
+                    # Fix: exit the async-with block (kills the subprocess), sleep
+                    # briefly, then spawn a fresh one and resume from the next iter.
+                    if result_text.startswith("[tool_timeout]"):
                         memory.record_outcome(
                             tool_call=tc,
                             result_text=result_text,
@@ -504,29 +480,117 @@ async def run(query: str) -> str:
                             run_id=run_id,
                             goal_id=goal.id,
                         )
-                        continue
+                        history.append(
+                            {
+                                "iter": it,
+                                "kind": "action",
+                                "goal_id": goal.id,
+                                "tool": tc.name,
+                                "arguments": tc.arguments,
+                                "result_descriptor": result_text[:800],
+                                "artifact_id": None,
+                            }
+                        )
+                        _needs_reconnect = True
+                        it += 1
+                        break  # exit inner while → outer loop will reconnect
 
-                memory.record_outcome(
-                    tool_call=tc,
-                    result_text=result_text,
-                    artifact_id=art_id,
-                    run_id=run_id,
-                    goal_id=goal.id,
-                )
-                history.append(
-                    {
-                        "iter": it,
-                        "kind": "action",
-                        "goal_id": goal.id,
-                        "tool": tc.name,
-                        "arguments": tc.arguments,
-                        "result_descriptor": result_text[:800],
-                        "artifact_id": art_id,
-                    }
-                )
+                    # Auto-complete acquisition goals on successful tool execution.
+                    # "Fetch the Wikipedia page" is done once fetch_url returns data;
+                    # no LLM answer is needed. This prevents Decision from looping
+                    # trying to re-read an artifact handle it can't use as a path.
+                    # Only fire for data-retrieval tools — utility tools like get_time
+                    # or currency_convert should not auto-complete a "search" goal
+                    # just because they returned a value.
+                    is_error = result_text.startswith("[") and (
+                        "error" in result_text[:80].lower()
+                        or "timeout" in result_text[:80].lower()
+                        or result_text.startswith("[STOP]")
+                    )
+                    is_empty = (
+                        "no results found" in result_text[:80].lower()
+                        or result_text.strip() in ("(empty directory)", "[]", "null", "")
+                    )
+                    if (not is_error and not is_empty
+                            and _is_acquisition_goal(goal.text)
+                            and tc.name in _AUTO_DONE_TOOLS):
+                        goal.done = True
+                        print(f"  [auto-done] acquisition goal satisfied by tool call")
 
-            else:
-                print(f"\n[agent] reached MAX_ITERATIONS={MAX_ITERATIONS}")
+                    # Hard-stop repeated empty searches: if the last 3 actions for
+                    # this goal all returned "No results found", skip further tool
+                    # calls and let Decision answer from its knowledge next iter.
+                    if is_empty:
+                        recent_empty = sum(
+                            1 for h in history[-6:]
+                            if h.get("kind") == "action"
+                            and h.get("goal_id") == goal.id
+                            and (
+                                "no results found" in h.get("result_descriptor", "").lower()
+                                or h.get("result_descriptor", "").strip() in ("[]", "null", "")
+                            )
+                        )
+                        if recent_empty >= 2:
+                            print(f"  [no-search] 3+ empty results — skipping tool, forcing answer next iter")
+                            # Remove tools from mcp_tools for the NEXT decision call
+                            # by injecting a sentinel into history
+                            history.append(
+                                {
+                                    "iter": it,
+                                    "kind": "action",
+                                    "goal_id": goal.id,
+                                    "tool": tc.name,
+                                    "arguments": tc.arguments,
+                                    "result_descriptor": result_text[:300] + " [SEARCH_EXHAUSTED: web_search returned no results after 3 attempts. Do NOT call web_search again. Instead call fetch_url on official documentation or well-known resource URLs for this topic.]",
+                                    "artifact_id": None,
+                                }
+                            )
+                            memory.record_outcome(
+                                tool_call=tc,
+                                result_text=result_text,
+                                artifact_id=None,
+                                run_id=run_id,
+                                goal_id=goal.id,
+                            )
+                            it += 1
+                            continue
+
+                    memory.record_outcome(
+                        tool_call=tc,
+                        result_text=result_text,
+                        artifact_id=art_id,
+                        run_id=run_id,
+                        goal_id=goal.id,
+                    )
+                    history.append(
+                        {
+                            "iter": it,
+                            "kind": "action",
+                            "goal_id": goal.id,
+                            "tool": tc.name,
+                            "arguments": tc.arguments,
+                            "result_descriptor": result_text[:800],
+                            "artifact_id": art_id,
+                        }
+                    )
+                    it += 1
+
+                else:
+                    print(f"\n[agent] reached MAX_ITERATIONS={MAX_ITERATIONS}")
+
+        # ── Reconnect after session poisoning by tool timeout ───────────── #
+        # Exit the async-with block above kills the stalled subprocess.
+        # Sleep briefly to let the OS clean up the pipe, then spawn a fresh one.
+        if _needs_reconnect and _session_restarts < _MAX_SESSION_RESTARTS:
+            _session_restarts += 1
+            print(
+                f"\n[agent] MCP session poisoned by tool timeout — "
+                f"reconnecting ({_session_restarts}/{_MAX_SESSION_RESTARTS})"
+            )
+            await asyncio.sleep(1.5)
+            continue  # outer reconnect loop: spawn fresh MCP subprocess
+
+        break  # normal exit (done, fatal error, max iterations, or max restarts)
 
     if fatal_error:
         sys.exit(1)
