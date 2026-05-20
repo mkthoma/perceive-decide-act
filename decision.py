@@ -104,12 +104,14 @@ STRICT RULES:
   must be substantive — at least 3 sentences or a numbered/bulleted list of ≥ 3 items.
 - For recommendation / "which is best" synthesis goals (e.g. "determine which
   activity is most appropriate", "recommend the best option based on X"): your
-  answer MUST be fully self-contained.  Include:
-    1. The complete list of all options found in prior HISTORY answers.
-    2. The relevant context (weather, constraints, etc.) from prior answers.
-    3. The recommendation with clear reasoning.
-  Do NOT write only the recommendation — the reader has not seen prior sub-goal
-  answers and needs all the information in one response.
+  answer MUST be fully self-contained and follow this exact structure:
+    1. PRESENT ALL OPTIONS: number every option from prior HISTORY answers
+       (e.g. if goal-1 found 3 activities, list all 3 numbered).  Do NOT
+       drop or skip any option — list them all before making a judgment.
+    2. CONTEXT: state the relevant constraint (weather, budget, etc.).
+    3. RECOMMENDATION: pick ONE as the single best choice with reasoning.
+  The reader has not seen prior sub-goal answers.  Omitting any option from
+  step 1 is an error — always enumerate the full set first.
 - If HISTORY already contains a tool result for this goal, answer from that result
   directly — do not call the same tool again, UNLESS the goal requires N fetches
   (e.g. "read the top 3 results") and fewer than N have been made yet — in that

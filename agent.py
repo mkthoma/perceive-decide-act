@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 import uuid
 
@@ -188,25 +189,30 @@ def _final_answer_from(history: list[dict], goals: list[Goal]) -> str:
 
     if last_answered_goal and _is_synthesis_goal(last_answered_goal.text):
         # Final goal is a true integration step.  Return its answer alone IF it
-        # looks self-contained (has multiple items / sentences from prior goals).
-        # If the synthesis answer is very short it probably only stated the
-        # recommendation without listing the options — fall through to join.
+        # looks self-contained — i.e. it lists at least as many numbered items
+        # as there were prior answered goals feeding into it.
         synth_text = answer_by_goal[last_answered_goal.id]
-        # Heuristic: a self-contained synthesis answer has ≥ 3 list markers or
-        # ≥ 4 sentences, meaning it summarised the full context.
-        _list_markers = synth_text.count("\n-") + synth_text.count("\n*") + synth_text.count("\n1.")
-        _sentences = synth_text.count(". ") + synth_text.count(".\n")
-        if _list_markers >= 2 or _sentences >= 3:
-            return synth_text
-        # Synthesis answer seems incomplete — prepend prior sub-goal answers so
-        # the user sees all the gathered information plus the recommendation.
-        prior_answers = [
-            answer_by_goal[g.id]
-            for g in goals
-            if g.id in answer_by_goal and g.id != last_answered_goal.id
-        ]
-        if prior_answers:
-            return "\n\n".join(prior_answers) + "\n\n" + synth_text
+
+        # Count numbered items in the synthesis answer (1. / 2. / 3. pattern)
+        _numbered = len(re.findall(r"(?m)^\s*\d+\.", synth_text))
+        # Count prior non-synthesis answered goals (the "options" that should be listed)
+        _prior_count = sum(
+            1 for g in goals
+            if g.id in answer_by_goal
+            and g.id != last_answered_goal.id
+            and not _is_synthesis_goal(g.text)
+        )
+
+        # If the synthesis answer has fewer numbered items than prior data goals,
+        # it dropped some options — prepend the prior answers so nothing is lost.
+        if _prior_count > 1 and _numbered < _prior_count:
+            prior_answers = [
+                answer_by_goal[g.id]
+                for g in goals
+                if g.id in answer_by_goal and g.id != last_answered_goal.id
+            ]
+            if prior_answers:
+                return "\n\n".join(prior_answers) + "\n\n" + synth_text
         return synth_text
 
     # No integrating final goal — join all answers in goal order.
