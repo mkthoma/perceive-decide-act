@@ -5,10 +5,9 @@ Nine tools, stdio transport:
     web_search, fetch_url, get_time, currency_convert,
     read_file, list_dir, create_file, update_file, edit_file
 
-web_search:  Tavily → Exa → Firecrawl → DuckDuckGo fallback chain.
-             Hard-capped at 5 results.
-fetch_url:   httpx fast-path (plain HTTP, ~3 s) → crawl4ai fallback for JS-heavy pages.
-Usage for all search providers is logged to ./usage.json with monthly
+web_search:  Tavily primary, DuckDuckGo fallback. Hard-capped at 5 results.
+fetch_url:   crawl4ai only — clean markdown via headless Chromium.
+Usage for tavily and duckduckgo is logged to ./usage.json with monthly
 rollover and a soft cap of 950/1000 on Tavily.
 
 File tools are sandboxed under ./sandbox/. Run:  python mcp_server.py
@@ -16,7 +15,6 @@ File tools are sandboxed under ./sandbox/. Run:  python mcp_server.py
 
 from __future__ import annotations
 
-import html.parser as _html_parser
 import json
 import os
 import threading
@@ -55,8 +53,6 @@ def _empty_usage(month: str) -> dict:
     return {
         "month": month,
         "tavily": {"count": 0, "errors": 0},
-        "exa": {"count": 0, "errors": 0},
-        "firecrawl": {"count": 0, "errors": 0},
         "duckduckgo": {"count": 0, "errors": 0},
     }
 
@@ -71,7 +67,7 @@ def _load_usage() -> dict:
         return _empty_usage(month)
     if data.get("month") != month:
         return _empty_usage(month)
-    for k in ("tavily", "exa", "firecrawl", "duckduckgo"):
+    for k in ("tavily", "duckduckgo"):
         data.setdefault(k, {"count": 0, "errors": 0})
     return data
 
@@ -106,42 +102,6 @@ def _tavily_search(query: str, max_results: int) -> list[dict]:
     ]
 
 
-def _exa_search(query: str, max_results: int) -> list[dict]:
-    from exa_py import Exa
-
-    client = Exa(api_key=os.environ["EXA_API_KEY"])
-    # search() returns text contents by default in exa-py 2.x
-    resp = client.search(
-        query,
-        num_results=max_results,
-        contents={"text": {"max_characters": 500}},
-    )
-    return [
-        {
-            "title": r.title or "",
-            "url": r.url,
-            "snippet": (getattr(r, "text", None) or "")[:500],
-        }
-        for r in resp.results
-    ]
-
-
-def _firecrawl_search(query: str, max_results: int) -> list[dict]:
-    from firecrawl import V1FirecrawlApp
-
-    app = V1FirecrawlApp(api_key=os.environ["FIRECRAWL_API_KEY"])
-    resp = app.search(query, limit=max_results)
-    rows: list[dict] = resp.data if resp.success else []
-    return [
-        {
-            "title": r.get("title", ""),
-            "url": r.get("url", ""),
-            "snippet": (r.get("description", "") or r.get("markdown", ""))[:500],
-        }
-        for r in rows[:max_results]
-    ]
-
-
 def _ddg_search(query: str, max_results: int) -> list[dict]:
     hits: list[dict] = []
     with DDGS() as ddgs:
@@ -160,84 +120,6 @@ def _ddg_search(query: str, max_results: int) -> list[dict]:
         }
         for h in hits
     ]
-
-
-_HTTPX_TIMEOUT = 12       # seconds for plain-HTTP fast-path
-_MAX_FETCH_CHARS = 20_000  # keep intro + key sections; enough for any fact extraction
-
-
-def _html_to_text(html_str: str) -> str:
-    """Strip HTML tags to plain text using stdlib html.parser (no extra deps)."""
-
-    class _Extractor(_html_parser.HTMLParser):
-        def __init__(self) -> None:
-            super().__init__()
-            self.parts: list[str] = []
-            self._skip_depth = 0
-            self._SKIP = {"script", "style", "nav", "footer", "head", "noscript"}
-
-        def handle_starttag(self, tag: str, attrs: list) -> None:
-            if tag in self._SKIP:
-                self._skip_depth += 1
-
-        def handle_endtag(self, tag: str) -> None:
-            if tag in self._SKIP and self._skip_depth:
-                self._skip_depth -= 1
-
-        def handle_data(self, data: str) -> None:
-            if not self._skip_depth:
-                stripped = data.strip()
-                if stripped:
-                    self.parts.append(stripped)
-
-    p = _Extractor()
-    p.feed(html_str)
-    return "\n".join(p.parts)
-
-
-async def _httpx_fetch(url: str) -> dict | None:
-    """Fast-path fetch via plain HTTP (no headless browser).
-
-    Returns a fetch_url-compatible dict on success, or None if the response
-    is unsuitable (binary, empty, <200 chars) so the caller falls back to
-    crawl4ai.
-    """
-    _HEADERS = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
-    }
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=_HTTPX_TIMEOUT) as client:
-            r = await client.get(url, headers=_HEADERS)
-        if r.status_code >= 400:
-            return {
-                "status": r.status_code,
-                "content_type": "",
-                "length_bytes": 0,
-                "text": f"[HTTP {r.status_code}]",
-            }
-        ctype = r.headers.get("content-type", "")
-        if "html" in ctype or not ctype:
-            text = _html_to_text(r.text)
-        elif "json" in ctype or "text" in ctype:
-            text = r.text
-        else:
-            return None  # binary — let crawl4ai handle it
-        text = text[:_MAX_FETCH_CHARS]
-        if len(text.strip()) < 200:
-            return None  # too little content — crawl4ai may do better
-        return {
-            "status": r.status_code,
-            "content_type": ctype,
-            "length_bytes": len(text.encode("utf-8")),
-            "text": text,
-        }
-    except Exception:
-        return None
 
 
 async def _crawl4ai_fetch(url: str) -> dict:
@@ -278,23 +160,8 @@ async def _crawl4ai_fetch(url: str) -> dict:
 
 @mcp.tool()
 def web_search(query: str, max_results: int = 5) -> list[dict]:
-    """Search the web and return snippets from multiple sources.
-
-    USE FOR: current events, weather forecasts, news, sports scores, live prices,
-    general knowledge, finding URLs, anything where multiple short snippets are
-    sufficient.  Best default choice when you need external information.
-
-    Provider chain (automatic fallback): Tavily → Exa → Firecrawl → DuckDuckGo.
-    Hard-capped at 5 results.
-
-    PREFER OVER fetch_url when: snippets are enough, you don't have a specific
-    URL yet, or you need speed (fetch_url is 3–30 s; web_search is ~1–2 s).
-
-    Example: web_search("Tokyo weather this Saturday", 3)
-    """
+    """Search the web (Tavily primary, DDG fallback). Hard-capped at 5 results. Example: web_search("python asyncio tutorial", 3)."""
     max_results = max(1, min(max_results, MAX_SEARCH_RESULTS))
-
-    # 1. Tavily — best quality, paid (soft cap 950/mo)
     if os.environ.get("TAVILY_API_KEY") and _under_cap("tavily"):
         try:
             results = _tavily_search(query, max_results)
@@ -303,70 +170,20 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
                 return results
         except Exception:
             _bump("tavily", "errors")
-
-    # 2. Exa — neural search, paid (free tier 1 000/mo)
-    if os.environ.get("EXA_API_KEY"):
-        try:
-            results = _exa_search(query, max_results)
-            if results:
-                _bump("exa")
-                return results
-        except Exception:
-            _bump("exa", "errors")
-
-    # 3. Firecrawl — scraping-based search, paid (free tier 500 credits/mo)
-    if os.environ.get("FIRECRAWL_API_KEY"):
-        try:
-            results = _firecrawl_search(query, max_results)
-            if results:
-                _bump("firecrawl")
-                return results
-        except Exception:
-            _bump("firecrawl", "errors")
-
-    # 4. DuckDuckGo — free, no key, rate-limited; last resort
     results = _ddg_search(query, max_results)
     _bump("duckduckgo")
     return results
 
 
 @mcp.tool()
-async def fetch_url(url: str) -> dict:
-    """Fetch the full text content of a specific URL.
-
-    USE FOR: reading the complete content of a known URL — Wikipedia articles,
-    documentation pages, blog posts, API responses.  Returns full page text,
-    not just a snippet.
-
-    PREFER OVER web_search when: you already have the exact URL and need the
-    full body (e.g. after a web_search returned the URL).
-
-    NOTE: Takes 3–30 seconds.  Avoid for weather sites, social media, or any
-    page that requires JavaScript to render content — use web_search instead.
-
-    Example: fetch_url("https://en.wikipedia.org/wiki/Claude_Shannon")
-    """
-    # Phase 1 — fast path: plain HTTP via httpx (works for Wikipedia, news sites, docs, APIs)
-    result = await _httpx_fetch(url)
-    if result and result.get("text", "").strip():
-        return result
-    # Phase 2 — slow path: headless Chromium via crawl4ai (for JS-rendered SPAs)
+async def fetch_url(url: str, timeout: int = 20) -> dict:
+    """Fetch clean markdown from a URL via crawl4ai (headless Chromium). Example: fetch_url("https://example.com")."""
     return await _crawl4ai_fetch(url)
 
 
 @mcp.tool()
 def get_time(timezone: str = "UTC") -> dict:
-    """Get the current date and time in any IANA timezone.
-
-    USE FOR: any query about the current time, date, or day of the week.
-    Always call this for real-time temporal questions — never guess the time.
-
-    The 'timezone' parameter must be a valid IANA name:
-      "UTC", "America/New_York", "America/Los_Angeles", "Europe/London",
-      "Europe/Paris", "Asia/Tokyo", "Asia/Kolkata", "Australia/Sydney"
-
-    Example: get_time("Asia/Tokyo")
-    """
+    """Current time in a named IANA timezone. Example: get_time("Asia/Kolkata")."""
     tz = ZoneInfo(timezone)
     now = datetime.now(tz)
     offset = now.utcoffset()
@@ -381,16 +198,7 @@ def get_time(timezone: str = "UTC") -> dict:
 
 @mcp.tool()
 def currency_convert(amount: float, from_currency: str, to_currency: str) -> dict:
-    """Convert an amount between currencies using live exchange rates.
-
-    USE FOR: currency conversion, exchange rate queries, "how much is X in Y
-    currency".  Rates are live from frankfurter.dev (ECB reference data).
-    Always call this for currency questions — never use stale training-data rates.
-
-    Parameters use ISO-4217 currency codes: USD, EUR, GBP, JPY, INR, AUD, CAD…
-
-    Example: currency_convert(100, "USD", "EUR")
-    """
+    """Convert money between ISO-3 currencies via frankfurter.dev. Example: currency_convert(100, "USD", "INR")."""
     f = from_currency.upper()
     t = to_currency.upper()
     url = f"https://api.frankfurter.dev/v1/latest?amount={amount}&base={f}&symbols={t}"
@@ -412,19 +220,7 @@ def currency_convert(amount: float, from_currency: str, to_currency: str) -> dic
 
 @mcp.tool()
 def read_file(path: str) -> dict:
-    """Read a UTF-8 text file from the sandbox.
-
-    USE FOR: recalling previously saved facts or data.  User-requested
-    persistent facts are saved under the memory/ directory — check there first
-    before saying information is unavailable.
-
-    Common pattern: if a prior run saved a fact, read it back with
-      read_file("memory/<descriptive_key>.txt")
-
-    Use list_dir("memory") first if you're unsure what memory files exist.
-
-    Example: read_file("memory/moms_birthday.txt")
-    """
+    """Read a UTF-8 text file from the sandbox. Example: read_file("notes.txt")."""
     p = _safe(path)
     text = p.read_text(encoding="utf-8")
     return {
@@ -437,14 +233,7 @@ def read_file(path: str) -> dict:
 
 @mcp.tool()
 def list_dir(path: str = ".") -> list[dict]:
-    """List files and directories inside the sandbox.
-
-    USE FOR: discovering what files exist before reading them.  In particular,
-    call list_dir("memory") to see what facts have been previously saved by
-    the user — then use read_file to retrieve the relevant one.
-
-    Example: list_dir("memory")
-    """
+    """List a directory inside the sandbox. Example: list_dir(".")."""
     p = _safe(path)
     out = []
     for child in sorted(p.iterdir()):
@@ -459,37 +248,19 @@ def list_dir(path: str = ".") -> list[dict]:
 
 @mcp.tool()
 def create_file(path: str, content: str) -> dict:
-    """Create a new file in the sandbox with given content.
-
-    USE FOR: durably saving any fact or data the user wants to remember.
-    Save to memory/<descriptive_key>.txt so it can be recalled later:
-      create_file("memory/moms_birthday.txt", "May 15, 2026")
-
-    Auto-creates parent directories — no need to create memory/ first.
-
-    IMPORTANT: raises an error if the file already exists.
-    Use update_file instead when the file may already exist.
-
-    Example: create_file("memory/project_deadline.txt", "2026-06-01")
-    """
+    """Create a new file in the sandbox; errors if it exists. Example: create_file("hello.txt", "hi")."""
     p = _safe(path)
     if p.exists():
         raise ValueError(f"File '{path}' already exists")
-    p.parent.mkdir(parents=True, exist_ok=True)
+    if not p.parent.exists():
+        raise ValueError(f"Parent directory of '{path}' does not exist")
     p.write_text(content, encoding="utf-8")
     return {"ok": True, "path": path, "size_bytes": p.stat().st_size}
 
 
 @mcp.tool()
 def update_file(path: str, content: str) -> dict:
-    """Overwrite an existing file in the sandbox with new content.
-
-    USE FOR: updating a previously saved fact when the file already exists.
-    If you're not sure whether the file exists, use this instead of
-    create_file — it raises an error only if the file is missing.
-
-    Example: update_file("memory/moms_birthday.txt", "May 16, 2026 (corrected)")
-    """
+    """Overwrite an existing sandbox file. Example: update_file("hello.txt", "new body")."""
     p = _safe(path)
     if not p.exists():
         raise ValueError(f"File '{path}' does not exist")
@@ -499,14 +270,7 @@ def update_file(path: str, content: str) -> dict:
 
 @mcp.tool()
 def edit_file(path: str, find: str, replace: str, replace_all: bool = False) -> dict:
-    """Find and replace text within an existing sandbox file.
-
-    USE FOR: making targeted edits without rewriting the entire file content.
-    Preferred over update_file when only part of the content needs to change.
-    Set replace_all=True to replace every occurrence of the search string.
-
-    Example: edit_file("memory/notes.txt", "old value", "new value")
-    """
+    """Find-and-replace inside a sandbox file. Example: edit_file("hello.txt", "foo", "bar")."""
     p = _safe(path)
     text = p.read_text(encoding="utf-8")
     count = text.count(find)

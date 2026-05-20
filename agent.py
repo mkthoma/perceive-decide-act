@@ -44,6 +44,18 @@ _MCP_PARAMS = StdioServerParameters(
     args=["run", "python", "mcp_server.py"],
 )
 
+# Pre-create sandbox sub-directories that create_file requires to exist.
+# mcp_server.create_file raises ValueError if the parent dir is missing,
+# so we ensure memory/ is always present before any agent run.
+_SANDBOX_DIRS = ["sandbox/memory"]
+
+def _ensure_sandbox_dirs() -> None:
+    """Create required sandbox sub-directories if they don't exist yet."""
+    import os as _os
+    base = _os.path.dirname(_os.path.abspath(__file__))
+    for d in _SANDBOX_DIRS:
+        _os.makedirs(_os.path.join(base, d), exist_ok=True)
+
 # Keywords that signal a synthesis / extraction goal → force-attach safety net
 _SYNTHESIS_KW = frozenset(
     "synthesize synthesise extract compare decide summarize summarise "
@@ -207,6 +219,8 @@ def _print_goals(goals: list[Goal]) -> None:
 # --------------------------------------------------------------------------- #
 
 async def run(query: str) -> str:
+    _ensure_sandbox_dirs()   # guarantee memory/ exists before create_file is called
+
     run_id = uuid.uuid4().hex[:8]
     history: list[dict] = []
     prior_goals: list[Goal] = []
