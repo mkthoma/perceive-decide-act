@@ -33,7 +33,7 @@ from router import DEFAULT_ROUTER_ORDER, LIMITS, Router, RouterPool, resolve
 
 # ── Routing config (mirrors main.py) ────────────────────────────────────────
 
-_DEFAULT_ORDER = "ollama,gemini,nvidia,groq,cerebras,openrouter,github"
+_DEFAULT_ORDER = "gemini,groq,cerebras,nvidia,openrouter,github,ollama"
 
 # Min context window (tokens) required for each tier.
 # Candidates are always drawn from router.order (LLM_ORDER) to respect user preference.
@@ -140,6 +140,28 @@ def _strip_titles(schema: dict) -> dict:
     return cleaned
 
 
+def _is_garbage_text(text: str) -> bool:
+    """Return True when text looks like garbled/incoherent model output.
+
+    Catches the patterns seen from degraded Ollama / free-tier providers:
+    - High pipe-character density (layout fragments)
+    - CJK characters mixed with pipe separators
+    - CJK + Greek simultaneously (multi-script hallucination)
+    """
+    if not text or len(text) < 20:
+        return False
+    # High pipe density: more than 6% of all chars are '|'
+    if text.count("|") / len(text) > 0.06:
+        return True
+    has_cjk = any('一' <= c <= '鿿' or '぀' <= c <= 'ヿ' for c in text)
+    if has_cjk and text.count("|") > 2:
+        return True
+    has_greek = any('Ͱ' <= c <= 'Ͽ' for c in text)
+    if has_cjk and has_greek:
+        return True
+    return False
+
+
 def _backoff_secs(err: Exception) -> float:
     msg = str(err).lower()
     status = getattr(err, "status", None)
@@ -155,6 +177,13 @@ def _backoff_secs(err: Exception) -> float:
         return 20
     if status in (401, 403):
         return 600
+    # 404 usually means capability mismatch (e.g. tool_choice not supported by
+    # this OpenRouter route) — back off long enough to skip this round entirely.
+    if status == 404:
+        return 300
+    # Non-retryable generic exception: small backoff to avoid tight loops
+    if not str(err).strip():
+        return 30
     return 0
 
 
@@ -224,9 +253,11 @@ async def chat(
     last_err: str | None = None
     initial_candidates = list(candidates)
 
-    # Up to 3 rounds: each round tries all remaining candidates once,
-    # then waits for the shortest cooldown (≤10s) before the next round.
-    for _round in range(3):
+    # Up to 4 rounds: each round tries all remaining candidates once,
+    # then waits for the shortest cooldown before the next round.
+    # 4 rounds = 3 waits, max ~171s per call at 57s Gemini backoff.
+    _max_rounds = int(os.getenv("LLM_GATEWAY_ROUNDS", "4"))
+    for _round in range(_max_rounds):
         for _ in range(len(candidates) + 1):
             name, atts = router.pick(est, candidates, required_caps=required_caps)
             all_attempts.extend(atts)
@@ -259,12 +290,31 @@ async def chat(
             except Exception as e:
                 last_err = str(e)
                 all_attempts.append({"provider": name, "reason": f"exception: {str(e)[:100]}"})
+                # Generic exceptions (connect error, empty error) get a short
+                # backoff so the provider is not retried on every round.
+                _generic_secs = _backoff_secs(e)
+                if _generic_secs == 0:
+                    _generic_secs = 30  # minimum 30s for any unrecognised failure
+                router.state[name].mark_unavailable(_generic_secs, str(e)[:80] or "generic exception")
                 candidates = [c for c in candidates if c != name]
                 continue
 
             tokens = (result.get("input_tokens") or 0) + (result.get("output_tokens") or 0)
             router.state[name].tokens_today += tokens
             router.state[name].tokens_minute.append((time.time(), tokens))
+
+            # Quality gate: reject garbled / incoherent text responses.
+            # Only fires for plain text (no tool calls, no structured output).
+            # Marks the offending provider unavailable for 90 s and retries
+            # the next candidate so callers never see garbage output.
+            _raw_text = result.get("text", "")
+            if _raw_text and not result.get("tool_calls") and not response_format:
+                if _is_garbage_text(_raw_text):
+                    router.state[name].mark_unavailable(90, "garbage_output_detected")
+                    candidates = [c for c in candidates if c != name]
+                    all_attempts.append({"provider": name, "reason": "garbage_output_detected"})
+                    last_err = f"garbage output from {name}"
+                    continue  # try next provider in inner loop
 
             # Normalize tool_calls — ensure arguments is always a dict
             normalized: list[dict] = []
@@ -317,7 +367,7 @@ async def chat(
             state_c = router.state[cname]
             if state_c.unavailable_until > now:
                 hard_wait = state_c.unavailable_until - now
-                if hard_wait <= 90 and (min_hard is None or hard_wait < min_hard):
+                if hard_wait <= 150 and (min_hard is None or hard_wait < min_hard):
                     min_hard = hard_wait
                 continue
             wait_c = LIMITS.get(cname, {}).get("cooldown", 0) - (now - state_c.last_call)
