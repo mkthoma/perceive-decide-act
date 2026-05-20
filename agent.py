@@ -369,7 +369,9 @@ async def run(query: str) -> str:
                             )
                         )
                         if _prior_run_answers and not _is_integrating:
-                            _reused = _prior_run_answers[-1]
+                            # Join ALL prior answers so nothing is dropped when
+                            # multiple extraction goals fed into this synthesis step.
+                            _reused = "\n\n".join(_prior_run_answers)
                             history.append(
                                 {
                                     "iter": it,
