@@ -2,7 +2,10 @@
 
 Lightweight agentic framework built on a four-role cognitive loop — **Memory → Perception → Decision → Action** — with MCP tool integration, artifact-aware goal tracking, and a multi-provider LLM gateway.
 
-[![Demo](https://img.youtube.com/vi/JZjA2fCKsgw/maxresdefault.jpg)](https://youtu.be/JZjA2fCKsgw)
+## Demo
+<a href="https://youtu.be/JZjA2fCKsgw">
+  <img src="https://img.youtube.com/vi/JZjA2fCKsgw/maxresdefault.jpg" alt="Demo" width="600">
+</a>
 
 ---
 
