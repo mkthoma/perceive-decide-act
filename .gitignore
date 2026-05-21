@@ -2,6 +2,9 @@
 state/
 sandbox/
 
+test_results.txt
+usage.json
+
 # Python bytecode
 __pycache__/
 *.pyc
