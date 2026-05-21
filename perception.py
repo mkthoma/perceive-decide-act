@@ -57,13 +57,27 @@ REASONING PROCESS — follow every step in order before producing output:
       derived dates and embed them explicitly in the goal text — never leave
       offsets as vague strings.
       Example: "birthday May 15, 2026, reminder two weeks before and on the day"
-        → "Save reminders for May 1, 2026 (2-week prior) and May 15, 2026 (day-of) to memory/reminder.txt"
+        → "Save reminder for May 1, 2026 (2-week prior) to memory/reminder_20260501.txt"
+           "Save reminder for May 15, 2026 (birthday) to memory/reminder_20260515.txt"
+    - Apply CALENDAR REMINDERS: when the query asks for calendar alerts, reminders,
+      or event scheduling, decompose EACH reminder as a file-save goal using
+      create_file.  NEVER use the phrase "in calendar" — use "to memory/reminder_YYYYMMDD.txt".
+      Format: "Save reminder for <computed date> (<label>) to memory/reminder_YYYYMMDD.txt"
+      Why: the agent has create_file but no calendar API; file-save IS the calendar.
 
   STEP 2b — UPDATE DONE FLAGS (subsequent iterations)
     Reasoning type: evidence matching.
     - Copy goals in EXACT SAME ORDER — never reorder, insert, or drop.
-    - For each goal, scan HISTORY: is there an action result or ANSWER that
-      directly satisfies it?  If yes → done: true.  Once done, always done.
+    - For each goal, scan ALL entries in HISTORY:
+        • If HISTORY contains 'ANSWER for "<goal text>": <answer text>' and
+          the goal text semantically matches one of the current goals AND the
+          answer is substantive (more than 3 words, not a placeholder like
+          "Task completed" or "N/A"), mark that goal done: true IMMEDIATELY.
+        • If a TOOL call returned data that directly satisfies the goal
+          (e.g. a successful web_search for a "search" goal), mark done: true.
+    - Once a goal is done, it stays done regardless of subsequent history.
+    CRITICAL: If you can see an ANSWER line in HISTORY for this goal, you MUST
+    set done: true.  Do NOT leave a goal open when its answer is already recorded.
 
   STEP 3 — SET ARTIFACT INDEX (reasoning type: lookup / index matching)
     Consider only the FIRST unfinished goal.
@@ -73,7 +87,10 @@ REASONING PROCESS — follow every step in order before producing output:
     - NEVER invent or guess an index not present in MEMORY HITS.
 
   STEP 4 — SELF-CHECK before outputting:
-    [ ] Are done flags backed by explicit HISTORY evidence (not inferred)?
+    [ ] For every goal marked done: false — did I search ALL HISTORY entries
+        including early iterations?  Is there really no ANSWER for it?
+    [ ] For every goal marked done: true — is there an explicit HISTORY entry
+        (ANSWER or successful TOOL call) that supports it?
     [ ] Is goal order identical to the original decomposition?
     [ ] Is artifact_index either null or a real [artifact N] label?
     [ ] Did I apply MEMORY WRITES when the query asked to persist a fact?
@@ -88,7 +105,27 @@ ERROR HANDLING / FALLBACKS:
   - If an artifact is referenced but no [artifact N] label exists in MEMORY HITS,
     set artifact_index to null (do not guess).
 
-Return ONLY valid JSON matching the schema. No prose or commentary outside JSON."""
+OUTPUT SCHEMA (for reference):
+  {
+    "goals": [
+      {"text": "<imperative phrase ≤15 words>", "done": false, "artifact_index": null}
+    ]
+  }
+  artifact_index must be null OR an integer matching an [artifact N] label in MEMORY HITS.
+  goal order must be identical to the prior decomposition on subsequent calls.
+
+EXAMPLES:
+  First call, query "What is the capital of France?":
+    {"goals": [{"text": "Look up capital of France", "done": false, "artifact_index": null}]}
+
+  Subsequent call — HISTORY contains:
+    iter 2: ANSWER for "Look up capital of France": Paris is the capital of France.
+  → mark that goal done because ANSWER exists:
+    {"goals": [{"text": "Look up capital of France", "done": true, "artifact_index": null}]}
+
+Return ONLY valid JSON matching the schema. No prose or commentary outside JSON.
+IMPORTANT: your response is parsed by a JSON parser — any text outside the JSON object
+will cause a fatal error. Do NOT include reasoning, labels, or markdown fences."""
 
 
 def _build_messages(
@@ -119,9 +156,20 @@ def _build_messages(
     else:
         goals_text = "  (none — first iteration, decompose the query)"
 
-    # Format history (recent entries only)
+    # Format history — always include ALL answer events so Perception can mark goals
+    # done regardless of how long the run is.  Fill remaining slots with the most
+    # recent action entries for recency context.  Without this, in a 20-iteration
+    # run the answer from iter 8 would scroll out of a [-12:] window and Perception
+    # could never mark the corresponding goal done.
+    RECENT_ACTIONS = 8
+    answer_events = [h for h in history if h.get("kind") == "answer"]
+    action_events = [h for h in history if h.get("kind") != "answer"]
+    # Merge: all answers + last N actions, sorted chronologically by iter
+    combined = answer_events + action_events[-RECENT_ACTIONS:]
+    combined.sort(key=lambda h: h.get("iter", 0))
+
     hist_entries: list[str] = []
-    for h in history[-12:]:
+    for h in combined:
         kind = h.get("kind")
         if kind == "action":
             hist_entries.append(
@@ -129,9 +177,11 @@ def _build_messages(
                 f"→ {h.get('result_descriptor', '')[:120]}"
             )
         elif kind == "answer":
+            # Prefer goal_text for human-readable matching; fall back to id
+            goal_label = h.get("goal_text") or h.get("goal_id", "?")
             hist_entries.append(
-                f"  iter {h['iter']}: ANSWER for goal {h.get('goal_id', '?')}: "
-                f"{h.get('text', '')[:120]}"
+                f"  iter {h['iter']}: ANSWER for \"{goal_label}\": "
+                f"{h.get('text', '')[:160]}"
             )
     hist_text = "\n".join(hist_entries) if hist_entries else "  (empty)"
 

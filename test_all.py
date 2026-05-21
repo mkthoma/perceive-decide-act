@@ -16,8 +16,10 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import shutil
 import sys
 import time
+from pathlib import Path
 
 # Windows: force UTF-8 so box-drawing characters don't crash cp1252
 if hasattr(sys.stdout, "reconfigure"):
@@ -175,6 +177,14 @@ async def main(indices: list[int] | None = None) -> None:
         if idx > 0 and _INTER_QUERY_DELAY > 0:
             print(dim(f"\n  (pausing {_INTER_QUERY_DELAY}s between queries — rate-limit headroom)\n"))
             await asyncio.sleep(_INTER_QUERY_DELAY)
+
+        # Before Query C Part 2: wipe the in-RAM memory cache so the agent must
+        # read the birthday file from disk rather than answering from the warm cache.
+        if "C Part 2" in label:
+            from memory import memory as _mem
+            _mem.clear()
+            print(bold(cyan("  memory cleared")))
+
         _banner(label, n, total)
         _print_question(query)
         try:
@@ -192,6 +202,20 @@ async def main(indices: list[int] | None = None) -> None:
     _summary(results)
 
 
+# ── State / sandbox cleanup ──────────────────────────────────────────────────
+
+def _clean_dirs() -> None:
+    """Remove state/ and sandbox/ so each test run starts from a blank slate."""
+    _here = Path(__file__).parent
+    for name in ("state", "sandbox"):
+        target = _here / name
+        if target.exists():
+            shutil.rmtree(target)
+            print(bold(f"  deleted {name}"))
+        else:
+            print(dim(f"  {name} not found — nothing to delete"))
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -202,4 +226,12 @@ if __name__ == "__main__":
         except ValueError:
             print(f"Usage: {sys.argv[0]} [query_numbers...]  (1=A  2=B  3=C1  4=C2  5=D)")
             sys.exit(1)
+
+    print()
+    print(bold(_rule()))
+    print(bold("  PRE-RUN CLEANUP"))
+    print(bold(_rule()))
+    _clean_dirs()
+    print(bold(_rule()))
+
     asyncio.run(main(indices))

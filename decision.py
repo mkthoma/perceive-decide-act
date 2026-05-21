@@ -21,6 +21,11 @@ _FC_RE = re.compile(r"<function\((\w+)\)\s*(\{.*?\})\s*</function>", re.DOTALL)
 # when they output the call as a string instead of a native tool_call object.
 _TC_TEXT_RE = re.compile(r"tool_call\s*:?\s*(\w+)\(", re.IGNORECASE)
 
+# Matches "name:N{json}" format — some OpenRouter/proxy routes emit tool calls as
+# plain text in the pattern: tool_name:call_index{arguments_json}
+# e.g.  web_search:0{"query": "...", "max_results": 5}
+_TC_INDEXED_RE = re.compile(r"^(\w+):(\d+)(\{[\s\S]*\})\s*$")
+
 # ------------------------------------------------------------------------------- #
 # System prompt — split into preamble + dynamic tool guide + rules               #
 # The TOOL SELECTION section is built at call time from the live MCP schema so  #
@@ -61,10 +66,32 @@ REASONING PROCESS:
     [ ] Am I free of art: handles in path / url arguments?
     [ ] For real-time queries: am I using a tool (not training-data assumptions)?
     [ ] For recommendation answers: do I follow OPTIONS → CONTEXT → RECOMMENDATION order?
+    [ ] Does the GOAL or query specify a format (numbered list, bullets, table)?
+        If yes: is my answer in EXACTLY that format?
+
+IMPORTANT: The REASONING PROCESS above is internal scratch work only.
+Your response must contain ONLY the final answer or tool_call — never the
+step headers, "Step N", classification labels, or any reasoning text.
+
+FORMAT COMPLIANCE — mandatory:
+  If the GOAL or the original user query specifies a format, your answer MUST
+  match it exactly:
+    • "numbered list" → lines starting with 1., 2., 3. — NEVER * or -
+    • "bullet points" or "bulleted list" → lines starting with - or *
+    • "table" → Markdown table
+    • "paragraph" → prose, no list markers
+  Ignore format requests only if the content has fewer than 2 items.
 
 You must return EXACTLY ONE of:
-  1. answer    — a direct response producible from CONTEXT or ATTACHED ARTIFACTS
-  2. tool_call — when external data, file access, or live values are needed
+  1. answer    — a direct text response producible from CONTEXT or ATTACHED ARTIFACTS
+                 • Plain prose or a Markdown list; no preamble ("Here is:", "answer:", etc.)
+                 • Must be substantive: ≥ 3 sentences, or ≥ 3 bullet items for synthesis goals
+                 • Must follow FORMAT COMPLIANCE above
+                 • Good example (numbered list requested): "1. Enable asyncio debug mode…
+                   2. Avoid blocking the event loop…  3. Use create_task() for concurrency…"
+  2. tool_call — one native function call (via the API mechanism, never as plain text)
+                 • Use when: external data, live values, file I/O, or step 2d applies
+                 • Bad example (never do this): writing "tool_call:web_search(...)" as text
 
 """
 
@@ -92,6 +119,11 @@ BEHAVIORAL NOTES (apply to whichever tools are available):
     NEXT URL — do NOT retry the same one. Answer only after all N URLs are attempted.
 
 STRICT RULES:
+- FORMAT: If the goal or query explicitly asks for a numbered list, you MUST
+  use `1.`, `2.`, `3.` prefixes. Bullet markers (`*`, `-`) violate this rule.
+- CALENDAR / REMINDERS: NEVER say "I don't have the ability to create calendar
+  events." Use create_file instead — write a human-readable reminder file to
+  memory/reminder_YYYYMMDD.txt.  This IS within your capabilities.
 - NEVER return both answer and tool_call in the same response.
 - NEVER emit a tool call as plain text (e.g. "tool_call:name(arg:val)").
   When step 3 selects tool_call, use the native tool_call return format —
@@ -188,9 +220,14 @@ def _build_tool_guide(tools: list[dict]) -> str:
         lines.append("")
 
     lines.append(
-        "  If NO available tool can satisfy the goal (e.g. set a calendar alert,\n"
-        "  send an email, post to social media, book a flight), answer directly\n"
-        "  with what the user should do manually — do NOT loop or retry."
+        "  CREATIVE TOOL USE — always prefer acting over saying \"I can't\":\n"
+        "    • Calendar reminders / scheduled alerts → create_file at\n"
+        "      memory/reminder_YYYYMMDD.txt with the date and reminder text.\n"
+        "      Example: create_file({'path': 'memory/reminder_20260501.txt',\n"
+        "               'content': 'REMINDER: Mom birthday in 2 weeks — May 15, 2026'})\n"
+        "    • Notes / facts / memos → create_file('memory/<topic>.txt', content)\n"
+        "    • If TRULY no tool can help (send email, post to social, book flight)\n"
+        "      → answer explaining the limitation, NOT an empty placeholder."
     )
     lines.append("")
 
@@ -350,6 +387,21 @@ async def next_step(
             return DecisionOutput(
                 tool_call=ToolCall(name=fn_name, arguments=args)
             )
+
+    # Detect "tool_name:N{json}" format — some OpenRouter routes emit native tool
+    # calls as plain text in pattern: name:call_index{arguments_json}
+    tc_idx = _TC_INDEXED_RE.match(text)
+    if tc_idx:
+        fn_name_idx = tc_idx.group(1)
+        try:
+            import json as _json3
+            idx_args = _json3.loads(tc_idx.group(3))
+            if isinstance(idx_args, dict):
+                return DecisionOutput(
+                    tool_call=ToolCall(name=fn_name_idx, arguments=idx_args)
+                )
+        except Exception:
+            pass
 
     # Some LLMs prefix their response with the option label ("answer\n...").
     # Strip it so it doesn't pollute the final answer shown to the user.

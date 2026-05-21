@@ -2,7 +2,7 @@
 
 Lightweight agentic framework built on a four-role cognitive loop — **Memory → Perception → Decision → Action** — with MCP tool integration, artifact-aware goal tracking, and a multi-provider LLM gateway.
 
-**Demo:** [https://youtu.be/CmgvtCqTdk0](https://youtu.be/CmgvtCqTdk0)
+[![Demo](https://img.youtube.com/vi/JZjA2fCKsgw/maxresdefault.jpg)](https://youtu.be/JZjA2fCKsgw)
 
 ---
 
@@ -31,7 +31,7 @@ TAVILY_API_KEY=your_tavily_api_key_here   # recommended: 1,000 free/mo
 
 The `.env` file lives at the **repo root** — one level above `llm_gatewayV3/`. The gateway reads `../.env` relative to its own directory, so a single file covers both.
 
-> **Search reliability:** Without a Tavily key, `web_search` falls back to DuckDuckGo (free, no key required) which works but is rate-limited and unreliable. Adding a Tavily key is the quickest fix — free tier at <https://app.tavily.com/>.
+> **Search reliability:** Without a Tavily key, `web_search` falls back to DuckDuckGo (free, no key required) which works but is rate-limited and unreliable. Adding a Tavily key is the quickest fix — free tier at [https://app.tavily.com/](https://app.tavily.com/).
 
 ### 3. Install agent dependencies
 
@@ -73,7 +73,7 @@ The agent runs a bounded loop of at most 20 iterations. Each iteration executes 
 |                    agent.py loop                        |
 |                                                         |
 |  +----------+   hits    +------------+                  |
-|  |  Memory  |---------->| Perception | (iter 1 only)   |
+|  |  Memory  |---------->| Perception | (every iter)    |
 |  +----------+           +-----+------+                  |
 |       ^                       | Observation             |
 |       | record_outcome        v                         |
@@ -87,7 +87,7 @@ The agent runs a bounded loop of at most 20 iterations. Each iteration executes 
 
 The loop terminates when all goals are marked `done`, or when `MAX_ITERATIONS` (20) is reached.
 
-> **Perception is called only on iteration 1.** It decomposes the query into goals once. On subsequent iterations `agent.py` manages goal completion directly — marking goals `done` immediately when Decision produces an answer or an acquisition tool call succeeds. This saves one LLM call per iteration and avoids rate-limit pressure on the Gemini free tier.
+> **Perception runs on every iteration.** Iteration 1 decomposes the query into goals. Every subsequent iteration Perception reads the full history and updates `done` flags via evidence matching — it is the sole authority for marking goals complete. `agent.py` never sets `goal.done = True` directly.
 
 ---
 
@@ -100,14 +100,34 @@ The loop terminates when all goals are marked `done`, or when `MAX_ITERATIONS` (
 **How it works:**
 
 1. At the start of every iteration, `memory.read(query, history)` performs a **keyword-overlap search** (no LLM, no cost) against all stored items. It tokenizes the query and the last six history entries, removes stopwords, then scores each stored item by how many of its keywords appear in that combined set. Top-8 hits are returned.
-
 2. `memory.remember(text)` is called once at run start with the raw user query. This fires **one LLM gateway call** to classify the text — assigning a `kind` (`fact`, `preference`, `tool_outcome`, `scratchpad`), extracting 3-10 search keywords, writing a human-readable `descriptor`, and building a structured `value` payload. The result is appended to `state/memory.json` and persists across process restarts.
-
 3. `memory.record_outcome(tool_call, result_text, artifact_id)` is called after every Action with zero LLM cost. It extracts keywords from the tool name and arguments, stores the result preview, and — critically — stores the `artifact_id` when the tool returned a large payload. This is how Perception learns that an artifact exists for a given goal.
 
 **Why it matters:** Without memory, each run starts cold. A fact remembered in run 1 ("mom's birthday is May 15") is instantly available as a keyword hit in run 2 — the agent answers without any tool call. Artifact IDs in tool-outcome records are how Perception decides which artifact to attach to an extraction goal, decoupling the fetch step from the read step across iterations.
 
 **Stored at:** `state/memory.json` — plain JSON array of `MemoryItem` objects.
+
+---
+
+## Prompt Evaluation Rubric
+
+All system prompts in this project are evaluated against a 9-criteria **[Prompt of Prompts (PoP)](https://github.com/mkthoma/perceive-decide-act/blob/main/prompt_evaluator.md)** rubric. Each criterion is a boolean pass/fail. A prompt is production-ready when all 9 are met.
+
+
+| #   | Criterion                             | What it checks                                                                                    |
+| --- | ------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| 1   | **Explicit Reasoning Instructions**   | Does the prompt tell the model *how* to think (step-by-step process), not just *what* to produce? |
+| 2   | **Structured Output Format**          | Is the expected output format defined precisely, with schema enforcement where possible?          |
+| 3   | **Separation of Reasoning and Tools** | Are tool-use decisions cleanly separated from reasoning and output generation?                    |
+| 4   | **Conversation Loop Support**         | Does the prompt handle multi-turn state — e.g. prior goals, history, done-flags — explicitly?     |
+| 5   | **Instructional Framing**             | Are all instructions imperative, unambiguous, and free of hedging language?                       |
+| 6   | **Internal Self-Checks**              | Does the prompt include a checklist or self-verification step before output?                      |
+| 7   | **Reasoning Type Awareness**          | Are the different kinds of reasoning the model must perform named and distinguished?              |
+| 8   | **Error Handling or Fallbacks**       | Are edge cases, ambiguous inputs, and failure modes explicitly handled?                           |
+| 9   | **Overall Clarity and Robustness**    | Would a new model, cold, produce correct output from this prompt alone with no extra context?     |
+
+
+The PoP JSON for each prompt appears in its `PoP validation` subsection. See [Perception](#pop-validation-9-criteria-rubric) and [Decision](#pop-validation-9-criteria-rubric-1) below.
 
 ---
 
@@ -117,21 +137,18 @@ The loop terminates when all goals are marked `done`, or when `MAX_ITERATIONS` (
 
 **How it works:**
 
-1. **First iteration** (`prior_goals` is empty): Perception sends the query, memory hits, and an empty prior-goals list to Gemini with `temperature=1.0`. The LLM decomposes the query into 1-4 short imperative goals ordered by logical dependency — fetch before extract, search before synthesize. If the query contains memory-write intent ("remember", "save", etc.) Perception places the durable-save goal first.
-
-2. **Subsequent iterations**: `agent.py` bypasses the Perception LLM call entirely and reuses the existing goal list. Goals are marked `done` by `agent.py` immediately when Decision answers or an acquisition tool call succeeds.
-
+1. **First iteration** (`prior_goals` is empty): Perception sends the query, memory hits, and an empty prior-goals list to Gemini with `temperature=1.0`. The LLM decomposes the query into 1-4 short imperative goals ordered by logical dependency — fetch before extract, search before synthesize. If the query contains memory-write intent ("remember", "save", etc.) Perception places the durable-save goal first. Calendar reminder goals are immediately reframed as `create_file` goals (e.g. `"Save reminder for May 1, 2026 to memory/reminder_20260501.txt"`) — the agent has no calendar API; file-save is the calendar.
+2. **Subsequent iterations**: Perception runs on every iteration. It receives the full goal list plus a merged history view — **all** `kind="answer"` entries from the entire run (never scrolled out) plus the last 8 action entries for recency context. It scans history for `ANSWER for "<goal text>": ...` lines and updates `done` flags accordingly. Perception is the **sole authority** for marking goals done; `agent.py` does not set `done = True` directly.
 3. **Artifact attachment**: For the first unfinished goal that requires reading a previously fetched artifact (e.g. "extract info from page"), Perception sets `artifact_index` pointing to the corresponding `[artifact N]` entry in the memory-hit list. The main loop resolves this index to the actual artifact ID stored by memory.
+4. **Sticky-done guard**: On the first iteration, `agent.py` resets all Perception-returned `done` flags to `False`. This prevents memory hits from prior runs from making Gemini think the task is already complete before any work has been done this run. On subsequent iterations, the sticky-done rule in Python (`done = slot.done or prior_goals[i].done`) ensures a goal can never regress from done to open.
 
-4. **Sticky-done guard**: On the first iteration, `agent.py` resets all Perception-returned `done` flags to `False`. This prevents memory hits from prior runs from making Gemini think the task is already complete before any work has been done this run.
-
-**Why it matters:** Pinning Perception to Gemini (`provider="g"`) ensures reliable structured-output compliance for the goal list schema. `temperature=1.0` prevents Gemini 3.x from stalling in a low-entropy loop. Calling it only once per run cuts free-tier Gemini RPM usage by up to 90% on long queries.
+**Why it matters:** Pinning Perception to Gemini (`provider="g"`) ensures reliable structured-output compliance for the goal list schema. `temperature=1.0` prevents Gemini 3.x from stalling in a low-entropy loop. The merged history view (all answers + last 8 actions) is critical: in a 20-iteration run, an answer recorded at iteration 3 would scroll out of a naive `[-12:]` window — Perception would lose sight of it and leave the goal open indefinitely.
 
 **Fallback:** If the Gemini call fails, Perception returns prior goals unchanged (or a single bare goal on the first iteration). The run degrades gracefully rather than crashing.
 
 #### System prompt
 
-The v3 prompt uses a four-step **REASONING PROCESS** with per-step reasoning-type labels. The **DATE COMPUTATION** rule in STEP 2a resolves time-offset phrases (e.g. "two weeks before") into exact calendar dates inline — eliminating a separate date-calculation goal. The **MEMORY WRITES** rule triggers only on explicit persistence keywords, preventing false-positive reminder injection on general queries.
+The v4 prompt uses a four-step **REASONING PROCESS** with per-step reasoning-type labels. **STEP 2a** adds a **CALENDAR REMINDERS** rule that rewrites calendar/alert goals as `create_file` file-save goals before they ever reach Decision — eliminating the "I can't create calendar events" failure mode. **STEP 2b** is strengthened to match the literal `ANSWER for "<goal text>":` history format and mandates `done: true` whenever a substantive answer is visible. The history view passed to Perception now includes **all** answer events (not just the last 12 entries) so done-flags are reliable even in 20-iteration runs.
 
 ```
 You are PERCEPTION, the goal-tracking orchestrator in an agentic loop.
@@ -155,13 +172,27 @@ REASONING PROCESS — follow every step in order before producing output:
       derived dates and embed them explicitly in the goal text — never leave
       offsets as vague strings.
       Example: "birthday May 15, 2026, reminder two weeks before and on the day"
-        → "Save reminders for May 1, 2026 (2-week prior) and May 15, 2026 (day-of) to memory/reminder.txt"
+        → "Save reminder for May 1, 2026 (2-week prior) to memory/reminder_20260501.txt"
+           "Save reminder for May 15, 2026 (birthday) to memory/reminder_20260515.txt"
+    - Apply CALENDAR REMINDERS: when the query asks for calendar alerts, reminders,
+      or event scheduling, decompose EACH reminder as a file-save goal using
+      create_file.  NEVER use the phrase "in calendar" — use "to memory/reminder_YYYYMMDD.txt".
+      Format: "Save reminder for <computed date> (<label>) to memory/reminder_YYYYMMDD.txt"
+      Why: the agent has create_file but no calendar API; file-save IS the calendar.
 
   STEP 2b — UPDATE DONE FLAGS (subsequent iterations)
     Reasoning type: evidence matching.
     - Copy goals in EXACT SAME ORDER — never reorder, insert, or drop.
-    - For each goal, scan HISTORY: is there an action result or ANSWER that
-      directly satisfies it?  If yes → done: true.  Once done, always done.
+    - For each goal, scan ALL entries in HISTORY:
+        • If HISTORY contains 'ANSWER for "<goal text>": <answer text>' and
+          the goal text semantically matches one of the current goals AND the
+          answer is substantive (more than 3 words, not a placeholder like
+          "Task completed" or "N/A"), mark that goal done: true IMMEDIATELY.
+        • If a TOOL call returned data that directly satisfies the goal
+          (e.g. a successful web_search for a "search" goal), mark done: true.
+    - Once a goal is done, it stays done regardless of subsequent history.
+    CRITICAL: If you can see an ANSWER line in HISTORY for this goal, you MUST
+    set done: true.  Do NOT leave a goal open when its answer is already recorded.
 
   STEP 3 — SET ARTIFACT INDEX (reasoning type: lookup / index matching)
     Consider only the FIRST unfinished goal.
@@ -171,7 +202,10 @@ REASONING PROCESS — follow every step in order before producing output:
     - NEVER invent or guess an index not present in MEMORY HITS.
 
   STEP 4 — SELF-CHECK before outputting:
-    [ ] Are done flags backed by explicit HISTORY evidence (not inferred)?
+    [ ] For every goal marked done: false — did I search ALL HISTORY entries
+        including early iterations?  Is there really no ANSWER for it?
+    [ ] For every goal marked done: true — is there an explicit HISTORY entry
+        (ANSWER or successful TOOL call) that supports it?
     [ ] Is goal order identical to the original decomposition?
     [ ] Is artifact_index either null or a real [artifact N] label?
     [ ] Did I apply MEMORY WRITES when the query asked to persist a fact?
@@ -186,16 +220,34 @@ ERROR HANDLING / FALLBACKS:
   - If an artifact is referenced but no [artifact N] label exists in MEMORY HITS,
     set artifact_index to null (do not guess).
 
+OUTPUT SCHEMA (for reference):
+  {
+    "goals": [
+      {"text": "<imperative phrase ≤15 words>", "done": false, "artifact_index": null}
+    ]
+  }
+
+EXAMPLES:
+  First call, query "What is the capital of France?":
+    {"goals": [{"text": "Look up capital of France", "done": false, "artifact_index": null}]}
+
+  Subsequent call — HISTORY contains:
+    iter 2: ANSWER for "Look up capital of France": Paris is the capital of France.
+  → mark that goal done because ANSWER exists:
+    {"goals": [{"text": "Look up capital of France", "done": true, "artifact_index": null}]}
+
 Return ONLY valid JSON matching the schema. No prose or commentary outside JSON.
+IMPORTANT: your response is parsed by a JSON parser — any text outside the JSON object
+will cause a fatal error. Do NOT include reasoning, labels, or markdown fences.
 ```
 
 #### [PoP validation](https://github.com/mkthoma/perceive-decide-act/blob/main/prompt_evaluator.md) (9-criteria rubric)
 
 ```json
 {
-  "prompt_id": "perception_system_v3",
+  "prompt_id": "perception_system_v4",
   "role": "PERCEPTION",
-  "evaluated_at": "2026-05-20",
+  "evaluated_at": "2026-05-21",
   "explicit_reasoning": true,
   "structured_output": true,
   "tool_separation": true,
@@ -204,7 +256,7 @@ Return ONLY valid JSON matching the schema. No prose or commentary outside JSON.
   "internal_self_checks": true,
   "reasoning_type_awareness": true,
   "fallbacks": true,
-  "overall_clarity": "Excellent. All 9 criteria met. The DATE COMPUTATION rule replaces the over-broad PROACTIVE REMINDERS, eliminating false-positive reminder injection on general queries. JSON-only output is explicit and enforced by Pydantic gateway schema injection. Conservative done-marking fallback prevents premature goal completion."
+  "overall_clarity": "Excellent. All 9 criteria met. STEP 2b now explicitly matches 'ANSWER for \"goal text\":' history entries and mandates done: true — eliminating the long-run loop bug where early answer events scrolled out of the history window. CALENDAR REMINDERS rule prevents 'in calendar' goal framing; file-save is used as the calendar primitive. STEP 4 self-check now validates both done: true AND done: false entries against explicit evidence. OUTPUT SCHEMA and EXAMPLES updated to show the exact history format Decision produces. Conservative fallback preserved."
 }
 ```
 
@@ -217,9 +269,7 @@ Return ONLY valid JSON matching the schema. No prose or commentary outside JSON.
 **How it works:**
 
 1. Decision builds a user message containing the current goal, memory hits, recent history (last 10 entries, each truncated to 800 chars), and — when Perception has attached one — the full bytes of the artifact rendered inline as `ATTACHED ARTIFACTS`.
-
 2. It sends this message to the gateway with `auto_route="decision"` and the full MCP tool list. The gateway classifies the request size (TINY or LARGE), selects a worker tier, and dispatches to the first available provider.
-
 3. The response is inspected for native tool calls first. If none are found, Decision checks for vLLM/Groq-style text markup `<function(name){...}</function>` before treating the text as an answer.
 
 **Tool reasoning:** Rather than hard-coded dispatch rules, Decision receives a dynamic **TOOL SELECTION guide** assembled at call time via `_build_tool_guide(mcp_tools)`. The guide is generated from the live MCP server schema on every call — so the tool list in the prompt is always current and never stale. Decision reasons from this guide to correctly select `get_time` for timezone questions, `create_file` for memory persistence, and the multi-fetch protocol for "read the top 3 results" goals. Adding or renaming a tool in `mcp_server.py` is automatically reflected in the prompt with no manual update needed.
@@ -266,10 +316,32 @@ REASONING PROCESS:
     [ ] Am I free of art: handles in path / url arguments?
     [ ] For real-time queries: am I using a tool (not training-data assumptions)?
     [ ] For recommendation answers: do I follow OPTIONS → CONTEXT → RECOMMENDATION order?
+    [ ] Does the GOAL or query specify a format (numbered list, bullets, table)?
+        If yes: is my answer in EXACTLY that format?
+
+IMPORTANT: The REASONING PROCESS above is internal scratch work only.
+Your response must contain ONLY the final answer or tool_call — never the
+step headers, "Step N", classification labels, or any reasoning text.
+
+FORMAT COMPLIANCE — mandatory:
+  If the GOAL or the original user query specifies a format, your answer MUST
+  match it exactly:
+    • "numbered list" → lines starting with 1., 2., 3. — NEVER * or -
+    • "bullet points" or "bulleted list" → lines starting with - or *
+    • "table" → Markdown table
+    • "paragraph" → prose, no list markers
+  Ignore format requests only if the content has fewer than 2 items.
 
 You must return EXACTLY ONE of:
-  1. answer    — a direct response producible from CONTEXT or ATTACHED ARTIFACTS
-  2. tool_call — when external data, file access, or live values are needed
+  1. answer    — a direct text response producible from CONTEXT or ATTACHED ARTIFACTS
+                 • Plain prose or a Markdown list; no preamble ("Here is:", "answer:", etc.)
+                 • Must be substantive: ≥ 3 sentences, or ≥ 3 bullet items for synthesis goals
+                 • Must follow FORMAT COMPLIANCE above
+                 • Good example (numbered list requested): "1. Enable asyncio debug mode…
+                   2. Avoid blocking the event loop…  3. Use create_task() for concurrency…"
+  2. tool_call — one native function call (via the API mechanism, never as plain text)
+                 • Use when: external data, live values, file I/O, or step 2d applies
+                 • Bad example (never do this): writing "tool_call:web_search(...)" as text
 ```
 
 **Tool selection** (`_build_tool_guide(mcp_tools)` — generated at runtime from the live MCP server schema):
@@ -302,6 +374,11 @@ BEHAVIORAL NOTES (apply to whichever tools are available):
     NEXT URL — do NOT retry the same one. Answer only after all N URLs are attempted.
 
 STRICT RULES:
+- FORMAT: If the goal or query explicitly asks for a numbered list, you MUST
+  use `1.`, `2.`, `3.` prefixes. Bullet markers (`*`, `-`) violate this rule.
+- CALENDAR / REMINDERS: NEVER say "I don't have the ability to create calendar
+  events." Use create_file instead — write a human-readable reminder file to
+  memory/reminder_YYYYMMDD.txt.  This IS within your capabilities.
 - NEVER return both answer and tool_call in the same response.
 - NEVER emit a tool call as plain text (e.g. "tool_call:name(arg:val)").
   When step 3 selects tool_call, use the native tool_call return format —
@@ -343,13 +420,17 @@ STRICT RULES:
   the artifact content — do not output a placeholder or call a tool again.
 ```
 
+**Tool selection** (`_build_tool_guide(mcp_tools)` — generated at runtime):
+
+> Assembled dynamically each call from `session.list_tools()`. Each entry includes the tool name, parameter signature (required vs optional), MCP server docstring, and per-parameter descriptions. A **CREATIVE TOOL USE** footer teaches Decision to use `create_file` for calendar reminders and notes when no purpose-specific tool is available, rather than refusing the goal. Adding or renaming a tool in `mcp_server.py` is automatically reflected here — no manual prompt update needed. For the current tool set, see the [MCP tools table](#mcp-tools-available-to-the-agent) below.
+
 #### [PoP validation](https://github.com/mkthoma/perceive-decide-act/blob/main/prompt_evaluator.md) (9-criteria rubric)
 
 ```json
 {
-  "prompt_id": "decision_system_v3",
+  "prompt_id": "decision_system_v4",
   "role": "DECISION",
-  "evaluated_at": "2026-05-20",
+  "evaluated_at": "2026-05-21",
   "explicit_reasoning": true,
   "structured_output": true,
   "tool_separation": true,
@@ -358,7 +439,7 @@ STRICT RULES:
   "internal_self_checks": true,
   "reasoning_type_awareness": true,
   "fallbacks": true,
-  "overall_clarity": "Excellent. All 9 criteria met. Four-step REASONING PROCESS with typed labels, dynamic TOOL SELECTION from live MCP schemas, 6-item self-check, and 13 STRICT RULES covering every known failure mode. The NEVER-emit-text-tool-call rule and balanced-paren parser close the text-format tool-call gap."
+  "overall_clarity": "Excellent. All 9 criteria met. FORMAT COMPLIANCE block enforces numbered-list vs bullet-point distinction with an explicit NEVER rule — eliminates asterisk output when user requests '1. 2. 3.' lists. CALENDAR / REMINDERS STRICT RULE eliminates 'I can't create calendar events' responses — create_file at memory/reminder_YYYYMMDD.txt is the calendar. CREATIVE TOOL USE footer in the dynamic TOOL SELECTION section provides concrete file-path patterns as fallbacks. STEP 4 self-check now includes a format-compliance gate. Dynamic TOOL SELECTION from live MCP schema means adding or renaming a tool in mcp_server.py is immediately reflected with no manual prompt update."
 }
 ```
 
@@ -371,11 +452,8 @@ STRICT RULES:
 **How it works:**
 
 1. **Guard check**: Before any dispatch, Action inspects the tool arguments for `art:...` handles in path/URL fields. If found, it returns an error descriptor immediately — this prevents Decision from accidentally passing a stale artifact handle to a tool that expects a real URL or file path.
-
 2. **MCP dispatch**: Calls `session.call_tool(name, arguments)` wrapped in `asyncio.wait_for` with a **30-second timeout** (surfaced to Decision as `[tool_timeout]`). If exceeded, Action returns the timeout descriptor and Decision switches strategy — falls back to `web_search`, tries a different URL, or answers from existing artifacts.
-
 3. **JSON post-processing**: The MCP server returns typed Python objects (`list[dict]`, `dict`) which FastMCP serialises as JSON strings. Action unwraps these into clean human-readable text before passing them to Decision — search results become `Title / URL / Snippet` blocks, file tool responses become plain file content, etc.
-
 4. **Artifact threshold**: If the tool response exceeds `ARTIFACT_THRESHOLD_BYTES` (4 KB), the bytes are written to the content-addressable artifact store (`state/artifacts/`). The returned descriptor includes the artifact handle (`art:<sha256[:16]>`) and a 200-character preview. If the response is small enough, it is returned as raw text with no artifact created.
 
 **Why it matters:** The artifact threshold is what keeps Decision's context from bloating. A 50 KB Wikipedia page is stored once as `art:4c163...` and referred to by handle throughout the remaining iterations. Only when Perception explicitly attaches it does Decision see the bytes — and only the bytes it actually needs. The `art:` guard closes the loop: Decision is told not to pass handles to tools, and Action enforces that rule at execution time.
@@ -417,28 +495,33 @@ _ANSWER_MARKERS = frozenset(
 
 Before each Decision call, `agent.py` selects which artifact bytes (if any) to attach inline:
 
-| Tier | Condition | Effect |
-|---|---|---|
-| **Explicit** | `goal.attach_artifact_id` set by Perception | Attaches that specific artifact |
-| **Force-attach** | `_is_synthesis_goal(goal.text)` and no explicit attach | Attaches up to 3 most-recent run artifacts |
-| **Context-attach** | Non-acquisition goal following a completed acquisition goal | Attaches most-recent run artifact |
+
+| Tier               | Condition                                                   | Effect                                     |
+| ------------------ | ----------------------------------------------------------- | ------------------------------------------ |
+| **Explicit**       | `goal.attach_artifact_id` set by Perception                 | Attaches that specific artifact            |
+| **Force-attach**   | `_is_synthesis_goal(goal.text)` and no explicit attach      | Attaches up to 3 most-recent run artifacts |
+| **Context-attach** | Non-acquisition goal following a completed acquisition goal | Attaches most-recent run artifact          |
+
 
 The context-attach tier ensures extraction goals (e.g. "Extract birth date from the fetched content") always receive the artifact that the prior fetch step produced, even when Perception's `artifact_index` is null.
 
-#### Acquisition goal auto-done
+#### Done-flag ownership — Perception only
 
-When an acquisition tool call (`web_search`, `fetch_url`, `read_file`, `list_dir`) succeeds for an acquisition goal, `agent.py` immediately marks the goal done:
+`agent.py` **never sets `goal.done = True` directly**. Done-flag marking is Perception's exclusive responsibility, enforced by the architecture spec. After every action or answer, `agent.py` records the result in `history` and increments the iteration counter. On the next iteration Perception reads that history entry — including `ANSWER for "<goal text>": ...` lines — and sets `done: true` via evidence matching.
+
+The Python-level sticky-done rule (`done = slot.done or prior_goals[i].done`) ensures a goal can never regress from done to open, even if Perception's evidence scan is conservative.
+
+History entries written by `agent.py` carry both `goal_id` and `goal_text` so Perception can match answers semantically rather than relying on opaque hex IDs:
 
 ```python
-_AUTO_DONE_TOOLS = frozenset({"web_search", "fetch_url", "read_file", "list_dir"})
-
-if (not is_error and not is_empty
-        and _is_acquisition_goal(goal.text)
-        and tc.name in _AUTO_DONE_TOOLS):
-    goal.done = True
+history.append({
+    "iter": it,
+    "kind": "answer",
+    "goal_id": goal.id,
+    "goal_text": goal.text,   # human-readable — lets Perception match by text
+    "text": answer_text,
+})
 ```
-
-This prevents Decision from looping trying to re-read an artifact handle after the data has already been fetched.
 
 #### Memory-write safety net
 
@@ -505,37 +588,18 @@ If the last 3 actions for a goal all returned empty results, `agent.py` appends 
 4. If that goal is a synthesis goal:
    a. Count numbered items in the synthesis answer.
    b. Count prior non-synthesis answered goals (the "options").
-   c. If prior_count >= 1 AND numbered < prior_count:
+   c. If prior_count >= 2 AND numbered < prior_count:
       -> the synthesis answer dropped options; prepend prior answers.
    d. Otherwise return the synthesis answer alone.
-5. If no synthesis gate: join all answers in goal order with double newline.
+5. If no synthesis gate: join all non-internal-goal answers in goal order.
+   Internal goals (memory-write stubs) and placeholder answers are skipped.
 ```
 
-The `prior_count >= 1` threshold (previously `> 1`) ensures the fallback fires even for two-goal queries where exactly one prior answered goal exists.
+The `prior_count >= 2` threshold ensures the fallback fires only when a synthesis goal is truly integrating multiple data sources — a synthesis about a *single* data goal is inherently self-contained and never "drops" an option. Answers for internally-injected housekeeping goals (e.g. `"Save fact to memory/ with create_file: ..."`) are filtered from final output by `_is_internal_goal()`.
 
 #### Emergency synthesis call
 
 If `_final_answer_from` produces only a placeholder (no answer was recorded, all goals were auto-completed by tool calls), `agent.py` makes one additional Decision call with no tools and the most recent run artifact attached, to synthesise a final answer from whatever was collected.
-
----
-
-## Prompt Evaluation Rubric
-
-All system prompts in this project are evaluated against a 9-criteria **Prompt of Prompts (PoP)** rubric. Each criterion is a boolean pass/fail. A prompt is production-ready when all 9 are met.
-
-| # | Criterion | What it checks |
-|---|-----------|----------------|
-| 1 | **Explicit Reasoning Instructions** | Does the prompt tell the model *how* to think (step-by-step process), not just *what* to produce? |
-| 2 | **Structured Output Format** | Is the expected output format defined precisely, with schema enforcement where possible? |
-| 3 | **Separation of Reasoning and Tools** | Are tool-use decisions cleanly separated from reasoning and output generation? |
-| 4 | **Conversation Loop Support** | Does the prompt handle multi-turn state — e.g. prior goals, history, done-flags — explicitly? |
-| 5 | **Instructional Framing** | Are all instructions imperative, unambiguous, and free of hedging language? |
-| 6 | **Internal Self-Checks** | Does the prompt include a checklist or self-verification step before output? |
-| 7 | **Reasoning Type Awareness** | Are the different kinds of reasoning the model must perform named and distinguished? |
-| 8 | **Error Handling or Fallbacks** | Are edge cases, ambiguous inputs, and failure modes explicitly handled? |
-| 9 | **Overall Clarity and Robustness** | Would a new model, cold, produce correct output from this prompt alone with no extra context? |
-
-The PoP JSON for each prompt appears in its `#### PoP validation` subsection. See [Perception](#perception----perceptionpy) and [Decision](#decision----decisionpy) above.
 
 ---
 
@@ -658,7 +722,7 @@ cd llm_gatewayV3
 uv run python main.py
 ```
 
-Ready when you see `Uvicorn running on http://127.0.0.1:8101`. Dashboard: <http://localhost:8101>
+Ready when you see `Uvicorn running on http://127.0.0.1:8101`. Dashboard: [http://localhost:8101](http://localhost:8101)
 
 ### Checking gateway health
 
@@ -687,15 +751,17 @@ If all router providers are unavailable, it falls back to the token-count rule �
 
 ### Provider keys
 
-| Provider | Free tier | Recommended for |
-|---|---|---|
-| Gemini | 15 RPM / 1,000 RPD | Perception (pinned), large-context extraction |
-| Groq | 30 RPM / 1,000 RPD | Decision (fast, high quality) |
-| Cerebras | 30 RPM / 1M tok/day | Memory (fast, small calls) |
-| NVIDIA NIM | 40 RPM | General worker |
-| GitHub Models | 10-15 RPM | Low-volume fallback |
-| OpenRouter | 20 RPM / 50 RPD | Additional coverage |
-| Ollama | unlimited | Local / offline |
+
+| Provider      | Free tier           | Recommended for                               |
+| ------------- | ------------------- | --------------------------------------------- |
+| Gemini        | 15 RPM / 1,000 RPD  | Perception (pinned), large-context extraction |
+| Groq          | 30 RPM / 1,000 RPD  | Decision (fast, high quality)                 |
+| Cerebras      | 30 RPM / 1M tok/day | Memory (fast, small calls)                    |
+| NVIDIA NIM    | 40 RPM              | General worker                                |
+| GitHub Models | 10-15 RPM           | Low-volume fallback                           |
+| OpenRouter    | 20 RPM / 50 RPD     | Additional coverage                           |
+| Ollama        | unlimited           | Local / offline                               |
+
 
 ---
 
@@ -711,24 +777,39 @@ uv run python test_all.py 3 4      # C1 and C2 only (1-based index)
 
 **Reset state between fresh runs:**
 
+`test_all.py` deletes `state/` and `sandbox/` automatically before the first query runs — no manual cleanup needed. The PRE-RUN CLEANUP banner confirms which directories were removed.
+
+To reset manually without running the test suite:
+
 ```bash
 rm -rf state/ sandbox/
 ```
 
-| # | Label | Query |
-|---|---|---|
-| 1 | Query A | Fetch Claude Shannon Wikipedia -- birth/death dates + 3 contributions |
-| 2 | Query B | 3 family-friendly Tokyo activities + live weather + recommendation |
-| 3 | Query C1 | Remember mom's birthday + calendar reminders |
-| 4 | Query C2 | Recall mom's birthday (run after C1) |
-| 5 | Query D | Search asyncio best practices, read top 3 results, list common advice |
 
-Each query has a **450-second timeout**. A timed-out query is marked as failed in the summary table but does not stop the remaining queries from running. A 60-second pause is inserted between queries to give free-tier providers time to clear rate-limit windows (`_INTER_QUERY_DELAY = 60`).
+| #   | Label    | Query                                                                 |
+| --- | -------- | --------------------------------------------------------------------- |
+| 1   | Query A  | Fetch Claude Shannon Wikipedia -- birth/death dates + 3 contributions |
+| 2   | Query B  | 3 family-friendly Tokyo activities + live weather + recommendation    |
+| 3   | Query C1 | Remember mom's birthday + calendar reminders                          |
+| 4   | Query C2 | Recall mom's birthday (run after C1)                                  |
+| 5   | Query D  | Search asyncio best practices, read top 3 results, list common advice |
+
+
+Each query has a **900-second timeout**. A timed-out query is marked as failed in the summary table but does not stop the remaining queries from running. A 60-second pause is inserted between queries to give free-tier providers time to clear rate-limit windows (`_INTER_QUERY_DELAY = 60`).
+
+Before the first query, `test_all.py` automatically deletes `state/` and `sandbox/` and prints a PRE-RUN CLEANUP banner confirming what was removed. Before Query C2, the in-RAM memory cache is wiped (`memory.clear()`) so the agent must rediscover mom's birthday by calling `list_dir` and `read_file` on the disk file written by C1 — verifying end-to-end durable recall.
 
 ### Sample run (5/5 pass)
 
 ```
 PS > uv run python -u test_all.py
+
+────────────────────────────────────────────────────────────────────────
+  PRE-RUN CLEANUP
+────────────────────────────────────────────────────────────────────────
+  deleted state
+  deleted sandbox
+────────────────────────────────────────────────────────────────────────
 
 ════════════════════════════════════════════════════════════════════════
   [1/5]  Query A — Artifact fetch & extraction
@@ -740,87 +821,48 @@ PS > uv run python -u test_all.py
   theory.
 
 
-[agent] run_id=ada67685
+[agent] run_id=2d40bcf9
 [agent] query: Fetch https://en.wikipedia.org/wiki/Claude_Shannon and tell me his birth date, death date, and three key contributions to information theory.
 
 
 --- iter 1 ---
   [open] Fetch content from https://en.wikipedia.org/wiki/Claude_Shannon
-  [open] Extract birth date, death date, and three key contributions to information theory from artifact 0
-  [open] Synthesize the extracted information into a summary response
+  [open] Extract birth date, death date, and three information theory contributions
   [decision] TOOL_CALL: fetch_url({'url': 'https://en.wikipedia.org/wiki/Claude_Shannon'})
   [action] -> [tool_timeout] fetch_url did not respond within 30s — try a different URL or approach.
 
+[agent] MCP session poisoned by tool timeout — reconnecting (1/3)
+
 --- iter 2 ---
-  [open] Fetch content from https://en.wikipedia.org/wiki/Claude_Shannon
-  [open] Extract birth date, death date, and three key contributions to information theory from artifact 0
-  [open] Synthesize the extracted information into a summary response
-  [decision] TOOL_CALL: web_search({'query': 'summary of Claude Shannon Wikipedia content'})
-  [action] -> [tool_timeout] web_search did not respond within 30s — try a different URL or approach.
+  [open] Search for Claude Shannon biography and contributions to information theory
+  [open] Extract birth date, death date, and three information theory contributions
+  [decision] ANSWER: Claude Shannon was an American mathematician, electrical engineer, and cryptographer known as the "father of information theory." He published a groundbreaking paper in 1948 titled "A Mathematical The...
 
 --- iter 3 ---
-  [open] Fetch content from https://en.wikipedia.org/wiki/Claude_Shannon
-  [open] Extract birth date, death date, and three key contributions to information theory from artifact 0
-  [open] Synthesize the extracted information into a summary response
-  [decision] ANSWER: It appears that there are ongoing technical issues preventing me from accessing external websites via `fetch_url` or `web_search` at this time.
+  [done] Search for Claude Shannon biography and contributions to information theory
+  [open] Extract birth date, death date, and three information theory contributions
+  [decision] ANSWER: Claude Shannon was born on April 30, 1916, and passed away on February 24, 2001. His three primary contributions to information theory include:
 
-Claude Shannon (1916–2001) was an American mathematicia...
+1.  **Introduction of Entropy:** He introduced entropy ...
 
 --- iter 4 ---
-  [done] Fetch content from https://en.wikipedia.org/wiki/Claude_Shannon
-  [open] Extract birth date, death date, and three key contributions to information theory from artifact 0
-  [open] Synthesize the extracted information into a summary response
-  [decision] ANSWER: I'll work with the historical and biographical information already present in the context, since tool attempts have timed out.
-
-## Extraction: Claude Shannon
-
-| Attribute | Details |
-|-----------|----...
-
---- iter 5 ---
-  [done] Fetch content from https://en.wikipedia.org/wiki/Claude_Shannon
-  [done] Extract birth date, death date, and three key contributions to information theory from artifact 0
-  [open] Synthesize the extracted information into a summary response
-  [decision] ANSWER: Claude Shannon (1916–2001) was a pioneering American mathematician, electrical engineer, and cryptographer, widely recognized as the "father of information theory." His work fundamentally transformed ...
+  [done] Search for Claude Shannon biography and contributions to information theory
+  [done] Extract birth date, death date, and three information theory contributions
 
 [done] all goals satisfied
-  ANSWER  (99.2s)
+  ANSWER  (58.7s)
 
-  It appears that there are ongoing technical issues preventing me from accessing external websites via `fetch_url` or `web_search` at this time.
+  Claude Shannon was an American mathematician, electrical engineer, and cryptographer known as the "father of information theory." He published a groundbreaking paper in 1948 titled "A Mathematical Theory of Communication," which introduced the concept of entropy as a measure of information and laid the foundation for digital communication and data compression. His work established the theoretical underpinnings for modern telecommunications, computer science, and digital circuit design.
 
-  Claude Shannon (1916–2001) was an American mathematician, electrical engineer, and cryptographer, widely known as the "father of information theory." He is best known for his landmark 1948 paper, "A Mathematical Theory of Communication," which established the foundations of digital communication, including the concept of the "bit" as the basic unit of information.
+  Shannon's contributions include the development of the binary digit (bit) as the fundamental unit of information and the formulation of channel capacity, which defines the maximum rate at which information can be transmitted over a communication channel. He also demonstrated how Boolean algebra could be applied to electrical circuits, enabling the design of digital switching circuits used in all modern computers. These innovations have had a lasting impact on technology, influencing everything from the internet to artificial intelligence.
 
-  In addition to his foundational work in information theory, Shannon made significant contributions to:
-  *   **Circuit Design:** In his master's thesis, he demonstrated that Boolean algebra could be used to optimize the design of electrical circuits, which is the basis for all modern digital computer design.
-  *   **Cryptography:** During World War II, he worked on code-breaking and secure communications, later publishing a paper on the mathematical theory of cryptography that proved the impossibility of breaking the "one-time pad" cipher.
-  *   **Game Theory and AI:** He was a pioneer in the field of artificial intelligence, famously building a machine that could solve the Rubik's Cube (or similar mechanical puzzles) and developing early algorithms for computer chess.
+  Beyond his technical achievements, Shannon was known for his curiosity and love of inventing, creating mechanical devices like a juggling robot and a maze-solving mouse. His interdisciplinary approach bridged engineering, mathematics, and computer science, making him one of the most influential figures of the 20th century in the digital revolution.
 
-  I'll work with the historical and biographical information already present in the context, since tool attempts have timed out.
+  Claude Shannon was born on April 30, 1916, and passed away on February 24, 2001. His three primary contributions to information theory include:
 
-  ## Extraction: Claude Shannon
-
-  | Attribute | Details |
-  |-----------|---------|
-  | **Birth Date** | April 30, 1916 |
-  | **Death Date** | February 24, 2001 |
-
-  ### Three Key Contributions to Information Theory
-
-  1. **"A Mathematical Theory of Communication" (1948):** His landmark paper establishing the mathematical foundations of information theory, which introduced a rigorous, quantitative framework for understanding how information can be transmitted, compressed, and stored.
-
-  2. **The Bit as the Basic Unit of Information:** He formalized the concept of the "bit" (binary digit) as the fundamental unit for measuring information, enabling the digital representation and processing of all information.
-
-  3. **Shannon's Source Coding and Channel Capacity Theorems:** He proved fundamental limits on data compression (source coding theorem) and established the maximum rate at which information can be reliably transmitted over a noisy channel (channel capacity theorem), defining the theoretical underpinnings of digital communication systems.
-
-  Claude Shannon (1916–2001) was a pioneering American mathematician, electrical engineer, and cryptographer, widely recognized as the "father of information theory." His work fundamentally transformed our understanding of communication and serves as the backbone of the modern digital age.
-
-  Based on the available information, here is a summary of his life and primary contributions:
-
-  *   **Foundation of Digital Communication:** His 1948 landmark paper, "A Mathematical Theory of Communication," established a rigorous quantitative framework for how information is transmitted, compressed, and stored.
-  *   **The Bit:** Shannon formalized the concept of the "bit" (binary digit) as the fundamental unit of information, a concept that remains essential to all digital technology today.
-  *   **Circuit Design:** In his master's thesis, he proved that Boolean algebra could be used to optimize the design of electrical circuits. This insight provided the theoretical basis for all modern digital computing and circuit design.
-
-  Shannon’s intellectual legacy is immense; by bridging the gap between abstract mathematical concepts and practical electrical engineering, he effectively enabled the development of the sophisticated digital systems that define contemporary society.
+  1.  **Introduction of Entropy:** He introduced entropy as a formal measure of information uncertainty and content, which became the cornerstone for data compression and information storage.
+  2.  **The Binary Digit (Bit):** He developed the concept of the binary digit, commonly known as the "bit," as the fundamental unit of information, enabling the quantification and processing of digital data.
+  3.  **Formulation of Channel Capacity:** He formulated the concept of channel capacity (often referred to as the Shannon limit), which determines the maximum theoretical rate at which information can be transmitted error-free over a communication channel.
 
 
   (pausing 60s between queries — rate-limit headroom)
@@ -836,63 +878,50 @@ Claude Shannon (1916–2001) was an American mathematicia...
   appropriate.
 
 
-[agent] run_id=fca0cedc
+[agent] run_id=4fd27248
 [agent] query: Find 3 family-friendly things to do in Tokyo this weekend. Check Saturday's weather forecast there and tell me which one is most appropriate.
 
 
 --- iter 1 ---
-  [open] Search for three family-friendly activities in Tokyo available this weekend.
-  [open] Fetch the weather forecast for Tokyo for this coming Saturday.
-  [open] Determine the most appropriate activity based on Saturday's weather forecast.
-  [decision] TOOL_CALL: get_time({'timezone': 'Asia/Tokyo'})
-  [action] -> Wednesday, 20 May 2026 22:04:51 JST
+  [open] Find three family-friendly activities in Tokyo
+  [open] Check Tokyo weather forecast for Saturday
+  [open] Recommend the most appropriate activity based on weather
+  [decision] TOOL_CALL: web_search({'query': 'family-friendly activities in Tokyo with children'})
+  [action] -> [artifact art:f6a30d44c422c91e, 10,625 bytes] preview: {   "title": "Exploring Tokyo with toddlers",   "url": "https://e
 
 --- iter 2 ---
-  [open] Search for three family-friendly activities in Tokyo available this weekend.
-  [open] Fetch the weather forecast for Tokyo for this coming Saturday.
-  [open] Determine the most appropriate activity based on Saturday's weather forecast.
-  [decision] TOOL_CALL: web_search({'query': 'family-friendly activities in Tokyo weekend May 23-24 2026'})
-  [action] -> [artifact art:68efa7cb28f3beab, 10,286 bytes] preview: {   "title": "Best Family-Friendly Events in Tokyo (2026) - Tiny
-  [auto-done] acquisition goal satisfied by tool call
+  [done] Find three family-friendly activities in Tokyo
+  [open] Check Tokyo weather forecast for Saturday
+  [open] Recommend the most appropriate activity based on weather
+  [decision] TOOL_CALL: web_search({'query': 'Tokyo weather forecast Saturday', 'max_results': 5})
+  [action] -> [artifact art:d901c50732f70909, 10,367 bytes] preview: {   "title": "Japan weather in May 2026 | Japan 14 day weather -
 
 --- iter 3 ---
-  [done] Search for three family-friendly activities in Tokyo available this weekend.
-  [open] Fetch the weather forecast for Tokyo for this coming Saturday.
-  [open] Determine the most appropriate activity based on Saturday's weather forecast.
-  [decision] TOOL_CALL: web_search({'query': 'weather forecast Tokyo Saturday 23 May 2026'})
-  [action] -> [artifact art:005e6a6106f9b08a, 10,675 bytes] preview: {   "title": "Weather in Tokyo in May 2026 - Detailed Forecast",
-  [auto-done] acquisition goal satisfied by tool call
+  [done] Find three family-friendly activities in Tokyo
+  [done] Check Tokyo weather forecast for Saturday
+  [open] Recommend the most appropriate activity based on weather
+  [force-attach] art:f6a30d44c422c91e (10,625 bytes)
+  [force-attach] art:d901c50732f70909 (10,367 bytes)
+  [decision] ANSWER: 1. Tokyo Imperial Palace Grounds – stroller-friendly gardens and ponds, great for a leisurely walk when it’s sunny or partly cloudy.
+2. Ueno Zoo – large outdoor attraction with giant pandas; ideal for...
 
 --- iter 4 ---
-  [done] Search for three family-friendly activities in Tokyo available this weekend.
-  [done] Fetch the weather forecast for Tokyo for this coming Saturday.
-  [open] Determine the most appropriate activity based on Saturday's weather forecast.
-  [force-attach] art:68efa7cb28f3beab (10,286 bytes)
-  [force-attach] art:005e6a6106f9b08a (10,675 bytes)
-  [decision] ANSWER: To determine the most appropriate activity for this coming Saturday, May 23, 2026, I have synthesized the weather forecast with the available event options.
-
-### 1. Present All Options
-Based on the av...
+  [done] Find three family-friendly activities in Tokyo
+  [done] Check Tokyo weather forecast for Saturday
+  [done] Recommend the most appropriate activity based on weather
 
 [done] all goals satisfied
-  ANSWER  (35.1s)
+  ANSWER  (60.1s)
 
-  To determine the most appropriate activity for this coming Saturday, May 23, 2026, I have synthesized the weather forecast with the available event options.
+  1. Tokyo Imperial Palace Grounds – stroller-friendly gardens and ponds, great for a leisurely walk when it’s sunny or partly cloudy.
+  2. Ueno Zoo – large outdoor attraction with giant pandas; ideal for clear, mild days but exposed to rain.
+  3. KidZania Tokyo – indoor role-play centre where kids try adult jobs; completely weather-proof, though English sessions are only on Wednesdays.
+  4. Sunshine City (Ikebukuro) – indoor complex with aquarium, Pokémon Center, and shops; perfect for rainy or drizzly days.
+  5. Tokyo Skytree observation deck – indoor, high-altitude views; good backup for overcast or wet weather.
 
-  ### 1. Present All Options
-  Based on the available event list for May 2026, here are potential activities for the family:
-  1.  **Design Festa:** A large art and design event featuring original creators, live painting, workshops, and performances. (Best for creative preschoolers and older children).
-  2.  **Indoor Museum Visits:** Specifically the **Family Day Kodomo Mat 2026** at the National Museum of Modern Art, Tokyo (MOMAT), which offers interactive dialogue programs for children and allows for a "museum debut" in a family-friendly, climate-controlled environment.
-  3.  **Indoor Workshops:** Various bookable indoor experiences, such as the **Samurai Ninja Museum Asakusa** (ninja training or sword lessons), **Sumo workshops**, or **Chopstick making classes**.
+  Context: May in Tokyo brings a mix of sunny, clear days and intermittent rain or drizzle, with temperatures generally comfortable (highs around 20–29 °C / 68–84 °F). Because showers can appear suddenly and outdoor heat can build when the sun is strong, the best choice balances comfort for the whole family with flexibility for changing conditions.
 
-  ### 2. Context
-  *   **Weather Constraint:** The forecast for Saturday, May 23, 2026, indicates "Patchy rain possible" with temperatures around 21°C. Given the risk of rain, outdoor events like Kiba Play Park are unsuitable, and outdoor festivals would be uncomfortable.
-  *   **Recommendation Criterion:** The ideal activity should be indoors or highly resistant to intermittent rain to ensure the family has a seamless day out regardless of the weather.
-
-  ### 3. Recommendation
-  The best choice for this Saturday is to **attend the Design Festa or visit an indoor museum such as the National Museum of Modern Art (MOMAT) for the "Family Day Kodomo Mat" program.**
-
-  *   **Reasoning:** Since the forecast calls for patchy rain, indoor venues are the safest and most enjoyable bet. The **Design Festa** is a massive, venue-based event that is effectively immune to the weather while providing highly engaging creative experiences for kids. Alternatively, the **MOMAT Family Day** is explicitly designed to be kid-friendly, providing a welcoming indoor space where parents don't need to worry about noise or movement, making it the most stress-free option for a rainy day. I recommend booking tickets for either of these in advance to ensure entry.
+  Recommendation: Sunshine City (Ikebukuro) is the single best choice. It offers the largest variety of indoor entertainment for all ages—an aquarium, the Pokémon Center, shopping, and dining—so unexpected rain or strong afternoon sun won’t disrupt the day. stroller access is straightforward, and it avoids the language barrier and limited English-days issue of KidZania. If the weather is reliably sunny and mild, Ueno Zoo or the Imperial Palace would be excellent, but Sunshine City provides the most dependable, weather-proof family experience in May.
 
 
   (pausing 60s between queries — rate-limit headroom)
@@ -907,58 +936,47 @@ Based on the av...
   calendar reminder for two weeks before and on the day.
 
 
-[agent] run_id=44933db3
+[agent] run_id=c4b14e28
 [agent] query: My mom's birthday is 15 May 2026. Remember that and give me a calendar reminder for two weeks before and on the day.
 
 
 --- iter 1 ---
-  [open] Save mom's birthday (May 15, 2026) to memory.
-  [open] Calculate the date two weeks before May 15, 2026.
-  [open] Create calendar reminders for May 1, 2026 and May 15, 2026.
-  [decision] TOOL_CALL: create_file({'path': 'memory/mom_birthday.txt', 'content': "Mom's birthday: May 15, 2026"})
-  [action] -> ok — created memory/mom_birthday.txt (28 bytes)
+  [open] Save birthday (May 15, 2026) to memory/moms_birthday.txt
+  [open] Save reminder for May 1, 2026 (2-week prior) to memory/reminder_20260501.txt
+  [open] Save reminder for May 15, 2026 (birthday) to memory/reminder_20260515.txt
+  [decision] TOOL_CALL: create_file({'content': "Mother's birthday is May 15, 2026.", 'path': 'memory/moms_birthday.txt'})
+  [action] -> ok — created memory/moms_birthday.txt (34 bytes)
 
 --- iter 2 ---
-  [open] Save mom's birthday (May 15, 2026) to memory.
-  [open] Calculate the date two weeks before May 15, 2026.
-  [open] Create calendar reminders for May 1, 2026 and May 15, 2026.
-  [decision] ANSWER: The date of your mother's birthday, May 15, 2026, has already been successfully saved to your memory file at `memory/mom_birthday.txt`. You can access this information at any time by requesting to rea...
+  [done] Save birthday (May 15, 2026) to memory/moms_birthday.txt
+  [open] Save reminder for May 1, 2026 (2-week prior) to memory/reminder_20260501.txt
+  [open] Save reminder for May 15, 2026 (birthday) to memory/reminder_20260515.txt
+  [decision] TOOL_CALL: create_file({'path': 'memory/reminder_20260501.txt', 'content': 'REMINDER: Mom birthday in 2 weeks — May 15, 2026'})
+  [action] -> ok — created memory/reminder_20260501.txt (50 bytes)
 
 --- iter 3 ---
-  [done] Save mom's birthday (May 15, 2026) to memory.
-  [open] Calculate the date two weeks before May 15, 2026.
-  [open] Create calendar reminders for May 1, 2026 and May 15, 2026.
-  [decision] TOOL_CALL: get_time({'timezone': 'UTC'})
-  [action] -> Wednesday, 20 May 2026 13:07:14 UTC
+  [done] Save birthday (May 15, 2026) to memory/moms_birthday.txt
+  [done] Save reminder for May 1, 2026 (2-week prior) to memory/reminder_20260501.txt
+  [open] Save reminder for May 15, 2026 (birthday) to memory/reminder_20260515.txt
+  [decision] TOOL_CALL: create_file({'content': "REMINDER: Mom's birthday — May 15, 2026", 'path': 'memory/reminder_20260515.txt'})
+  [action] -> ok — created memory/reminder_20260515.txt (41 bytes)
 
 --- iter 4 ---
-  [done] Save mom's birthday (May 15, 2026) to memory.
-  [open] Calculate the date two weeks before May 15, 2026.
-  [open] Create calendar reminders for May 1, 2026 and May 15, 2026.
-  [decision] ANSWER: May 15, 2026 is a known fixed date. Two weeks before it would logically be May 1, 2026. No tool is needed for this simple date calculation. Subtracting 14 days from May 15, 2026, I need to account for...
-
---- iter 5 ---
-  [done] Save mom's birthday (May 15, 2026) to memory.
-  [done] Calculate the date two weeks before May 15, 2026.
-  [open] Create calendar reminders for May 1, 2026 and May 15, 2026.
-  [decision] ANSWER: I am an AI assistant and I do not have direct access to your personal calendar application to create entries or set alarms. To set these reminders, please manually add the following events to your pre...
+  [done] Save birthday (May 15, 2026) to memory/moms_birthday.txt
+  [done] Save reminder for May 1, 2026 (2-week prior) to memory/reminder_20260501.txt
+  [done] Save reminder for May 15, 2026 (birthday) to memory/reminder_20260515.txt
 
 [done] all goals satisfied
-  ANSWER  (62.3s)
+  ANSWER  (54.8s)
 
-  The date of your mother's birthday, May 15, 2026, has already been successfully saved to your memory file at `memory/mom_birthday.txt`. You can access this information at any time by requesting to read that file.
-
-  May 15, 2026 is a known fixed date. Two weeks before it would logically be May 1, 2026. No tool is needed for this simple date calculation. Subtracting 14 days from May 15, 2026, I need to account for the days in April. April has 30 days. 15 days back from May 15 stays in May (May 1), but 14 days back means April 30 minus 13 days = April 31? No, let me recount. 14 days before May 15: May 15 minus 14 days. 15 minus 14 equals 1. So it's May 1, 2026.</think>answer
-  Two weeks before May 15, 2026 is **May 1, 2026** (14 days prior).
-
-  I am an AI assistant and I do not have direct access to your personal calendar application to create entries or set alarms. To set these reminders, please manually add the following events to your preferred calendar app (like Google Calendar, Outlook, or Apple Calendar):
-
-  *   **May 1, 2026:** [Set your desired reminder for this date]
-  *   **May 15, 2026:** Mother's Birthday (as stored in your `memory/mom_birthday.txt`)
+  1. A calendar reminder has been created for your mom's birthday on May 15, 2026.
+  2. An additional reminder has been set for two weeks prior, on May 1, 2026, to give you ample time to prepare.
+  3. Both reminders have been saved as text files in the memory/ directory for future reference.
 
 
   (pausing 60s between queries — rate-limit headroom)
 
+  memory cleared
 
 ════════════════════════════════════════════════════════════════════════
   [4/5]  Query C Part 2 — Durable memory recall
@@ -968,28 +986,34 @@ Based on the av...
   When is mom's birthday?
 
 
-[agent] run_id=eb0a739a
+[agent] run_id=21305ed4
 [agent] query: When is mom's birthday?
 
 
 --- iter 1 ---
-  [open] Save mom's birthday (May 15, 2026) to memory/mom_birthday.txt
-  [open] Report that mom's birthday is May 15, 2026
-  [decision] ANSWER: The memory hit shows that this goal has already been completed. Looking at the tool outcome, the file `memory/mom_birthday.txt` was already created with mom's birthday (May 15, 2026), so I should answ...
+  [open] Search for information about mom's birthday
+  [decision] TOOL_CALL: list_dir({'path': 'memory'})
+  [action] -> {
+  "name": "moms_birthday.txt",
+  "type": "file",
+  "size_bytes": 34
+}
+{
+  "name": "reminder_20260501.txt",
+  "type": "
 
 --- iter 2 ---
-  [done] Save mom's birthday (May 15, 2026) to memory/mom_birthday.txt
-  [open] Report that mom's birthday is May 15, 2026
-  [decision] ANSWER: Mom's birthday (May 15, 2026) has already been successfully recorded in your system's memory file, `memory/mom_birthday.txt`.
+  [open] Read memory/moms_birthday.txt to find mom's birthday
+  [decision] TOOL_CALL: read_file({'path': 'memory/moms_birthday.txt'})
+  [action] -> Mother's birthday is May 15, 2026.
+
+--- iter 3 ---
+  [done] Read memory/moms_birthday.txt to find mom's birthday
 
 [done] all goals satisfied
-  ANSWER  (20.6s)
+  ANSWER  (26.9s)
 
-  The memory hit shows that this goal has already been completed. Looking at the tool outcome, the file `memory/mom_birthday.txt` was already created with mom's birthday (May 15, 2026), so I should answer that this has been done. Since the instruction says MEMORY HITS are part of context and if a hit's descriptor contains the answer, I should answer directly from it rather than saying unavailable. I'll just confirm the success.
-
-  No tool call needed because the outcome already confirms the file was created. Let me provide a direct answer.</think>Mom's birthday (May 15, 2026) has already been saved to `memory/mom_birthday.txt`.
-
-  Mom's birthday (May 15, 2026) has already been successfully recorded in your system's memory file, `memory/mom_birthday.txt`.
+  Your mother's birthday is on May 15, 2026.
 
 
   (pausing 60s between queries — rate-limit headroom)
@@ -1004,94 +1028,60 @@ Based on the av...
   and give me a short numbered list of the advice they agree on.
 
 
-[agent] run_id=8d431c27
+[agent] run_id=d2d212da
 [agent] query: Search for 'Python asyncio best practices', read the top 3 results, and give me a short numbered list of the advice they agree on.
 
 
 --- iter 1 ---
-  [open] Search for Python asyncio best practices.
-  [open] Read the content of the top 3 results.
-  [open] Synthesize and list the advice agreed upon by the results.
+  [open] Search for Python asyncio best practices
+  [open] Read and extract advice from top 3 search results
+  [open] Synthesize a numbered list of agreed upon asyncio best practices
   [decision] TOOL_CALL: web_search({'query': 'Python asyncio best practices', 'max_results': 5})
-  [action] -> [artifact art:ab21f0257c1bfdc3, 10,247 bytes] preview: {   "title": "Asyncio Best Practices and Common Pitfalls",   "url
-  [auto-done] acquisition goal satisfied by tool call
+  [action] -> [artifact art:74f266548051a5e5, 10,172 bytes] preview: {   "title": "Asyncio best practices - Async-SIG - Discussions on
 
 --- iter 2 ---
-  [done] Search for Python asyncio best practices.
-  [open] Read the content of the top 3 results.
-  [open] Synthesize and list the advice agreed upon by the results.
-  [context-attach] art:ab21f0257c1bfdc3 (10,247 bytes)
-  [decision] ANSWER: Based on the provided resources, here is a summary of the best practices for using Python's `asyncio` library from the top results:
-
-### 1. **Core Execution and Entry Points**
-*   **Use `asyncio.run()...
+  [done] Search for Python asyncio best practices
+  [open] Read and extract advice from top 3 search results
+  [open] Synthesize a numbered list of agreed upon asyncio best practices
+  [context-attach] art:74f266548051a5e5 (10,172 bytes)
+  [decision] ANSWER: 1. Use `asyncio.run()` as your main entry point to ensure proper event loop initialization, cleanup, and exception handling.
+2. Avoid blocking the event loop; never use blocking functions like `time.s...
 
 --- iter 3 ---
-  [done] Search for Python asyncio best practices.
-  [done] Read the content of the top 3 results.
-  [open] Synthesize and list the advice agreed upon by the results.
-  [force-attach] art:ab21f0257c1bfdc3 (10,247 bytes)
-  [decision] ANSWER: Based on the provided artifacts, here is the **agreed-upon advice** for `asyncio` best practices synthesized across the search results:
+  [done] Search for Python asyncio best practices
+  [done] Read and extract advice from top 3 search results
+  [open] Synthesize a numbered list of agreed upon asyncio best practices
+  [force-attach] art:74f266548051a5e5 (10,172 bytes)
+  [decision] ANSWER: 1. Use `asyncio.run()` as your main entry point to ensure proper event loop initialization, cleanup, and exception handling.
+2. Avoid blocking the event loop; never use blocking functions like `time.s...
 
-### 1. **Use `asyncio.run()` as the Main Entry Point**
-Always w...
+--- iter 4 ---
+  [done] Search for Python asyncio best practices
+  [done] Read and extract advice from top 3 search results
+  [done] Synthesize a numbered list of agreed upon asyncio best practices
 
 [done] all goals satisfied
-  ANSWER  (20.8s)
+  ANSWER  (26.2s)
 
-  Based on the provided resources, here is a summary of the best practices for using Python's `asyncio` library from the top results:
-
-  ### 1. **Core Execution and Entry Points**
-  *   **Use `asyncio.run()`:** Always use this as the main entry point for your programs. It handles the proper setup, teardown, and cleanup of the event loop.
-  *   **Understand `async/await`:** Simply defining a function with `async def` does not make it asynchronous. You must properly use `await` on coroutines; otherwise, your code will run synchronously.
-
-  ### 2. **Avoiding Event Loop Blocking**
-  *   **Don't Block the Loop:** Never use blocking synchronous code (like `time.sleep()`) inside an async function, as it halts the event loop entirely. Use `await asyncio.sleep()` for non-blocking pauses instead.
-  *   **Handling Blocking Code:** If you must use blocking I/O operations, use `loop.run_in_executor()` to offload them to a thread pool, keeping the event loop free to handle other tasks.
-  *   **Avoid Long-Running Loops:** Avoid writing functions with long-running synchronous loops that block the loop. Break them down or schedule iterations back onto the event loop.
-
-  ### 3. **Concurrency and Resource Management**
-  *   **Use `asyncio.create_task()`:** Use this to schedule independent operations to run concurrently in the background rather than awaiting them sequentially.
-  *   **Leverage `asyncio.gather()`:** Use this to run multiple coroutines concurrently and wait for all of them to complete.
-  *   **Use Async Context Managers:** When dealing with resources, prefer `async with` to ensure proper setup and teardown of asynchronous resources.
-
-  ### 4. **Error and Task Handling**
-  *   **Graceful Cancellation:** Always be prepared to catch `asyncio.CancelledError`. When a task is cancelled, ensure you clean up any held resources properly before re-raising the exception to maintain expected behavior.
-
-  Based on the provided artifacts, here is the **agreed-upon advice** for `asyncio` best practices synthesized across the search results:
-
-  ### 1. **Use `asyncio.run()` as the Main Entry Point**
-  Always wrap your async entry point with `asyncio.run()`; it properly sets up and tears down the event loop and handles cleanup properly.
-
-  ### 2. **Always Await Coroutines**
-  Simply calling an `async def` function returns a coroutine object without executing it. You must `await` it (or schedule it with `asyncio.run()`) for it to run. Similarly, `await` all async operations to avoid unintended synchronous execution.
-
-  ### 3. **Never Block the Event Loop**
-  Avoid synchronous blocking calls—such as `time.sleep()` or long-running loops—inside async functions. Use `await asyncio.sleep()` for pauses and offload blocking I/O to a thread pool via `loop.run_in_executor()` when necessary.
-
-  ### 4. **Run Concurrent Work with `asyncio.create_task()` or `asyncio.gather()`**
-  To achieve true concurrency, schedule independent coroutines as background **Tasks** using `asyncio.create_task()` or use `asyncio.gather()` to run multiple coroutines concurrently rather than awaiting them sequentially.
-
-  ### 5. **Handle `asyncio.CancelledError` Gracefully**
-  Wrap long-running tasks in `try/except asyncio.CancelledError` blocks to clean up resources and re-raise the exception so the event loop can properly cancel the task.
-
-  ### 6. **Use Async Context Managers for Resource Management**
-  When available, prefer `async with` for managing async resources (like connections or streams) to ensure proper acquisition and cleanup.
-
-  ### 7. **Use Semaphores to Limit Concurrency**
-  Where applicable, use `asyncio.Semaphore` to prevent overwhelming external services or resource pools by bounding the number of concurrent operations.
+  1. Use `asyncio.run()` as your main entry point to ensure proper event loop initialization, cleanup, and exception handling.
+  2. Avoid blocking the event loop; never use blocking functions like `time.sleep()` within coroutines, and instead use non-blocking alternatives like `await asyncio.sleep()`. If you must run blocking I/O, utilize `loop.run_in_executor()` to move that work off the main event loop.
+  3. Use `asyncio.create_task()` to schedule coroutines to run concurrently in the background rather than awaiting them sequentially, and ensure you always await any tasks you create to prevent them from being cancelled prematurely.
+  4. Prefer using `async` context managers (`async with`) to ensure robust resource management, particularly when dealing with network sessions or database connections.
+  5. Always await coroutines explicitly; forgetting to await them is a common mistake that leads to unexpected behavior or unexecuted code.
+  6. Handle cancellation gracefully by catching `asyncio.CancelledError`, performing any necessary cleanup, and then re-raising the exception to properly mark the task as cancelled.
+  7. Do not create functions with long-running synchronous loops inside async code, as this halts the entire event loop and negates async benefits.
 
 
 ────────────────────────────────────────────────────────────────────────
   RESULTS
 ────────────────────────────────────────────────────────────────────────
-  ✓   99.2s  Query A — Artifact fetch & extraction
-  ✓   35.1s  Query B — Multi-goal with live weather
-  ✓   62.3s  Query C Part 1 — Durable memory write
-  ✓   20.6s  Query C Part 2 — Durable memory recall
-  ✓   20.8s  Query D — Web research & URL reading
+  ✓   58.7s  Query A — Artifact fetch & extraction
+  ✓   60.1s  Query B — Multi-goal with live weather
+  ✓   54.8s  Query C Part 1 — Durable memory write
+  ✓   26.9s  Query C Part 2 — Durable memory recall
+  ✓   26.2s  Query D — Web research & URL reading
 ────────────────────────────────────────────────────────────────────────
-  5/5 passed  (238.0s total)
+  5/5 passed  (226.7s total)
 ────────────────────────────────────────────────────────────────────────
 
 ```
@@ -1100,26 +1090,30 @@ Always w...
 
 ## MCP tools available to the agent
 
-| Tool | Description |
-|---|---|
-| `web_search` | Tavily primary, DuckDuckGo fallback. Returns titles, URLs, snippets. Hard-capped at 5 results. Usage logged to `usage.json` with monthly rollover and a soft cap of 950/1,000 on Tavily. |
-| `fetch_url` | crawl4ai headless Chromium -- clean markdown from any URL. Subject to 30 s Action-layer timeout; Decision falls back to `web_search` or the next URL on `[tool_timeout]`. |
-| `get_time` | Current time in any IANA timezone (e.g. `"Asia/Tokyo"`) |
-| `currency_convert` | Live rates via Frankfurter API |
-| `read_file` | Read a UTF-8 file from `sandbox/` |
-| `list_dir` | List contents of a `sandbox/` directory |
-| `create_file` | Create a new file in `sandbox/` (errors if already exists; parent directory must exist) |
-| `update_file` | Overwrite an existing `sandbox/` file |
-| `edit_file` | Find-and-replace inside a `sandbox/` file |
+
+| Tool               | Description                                                                                                                                                                              |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `web_search`       | Tavily primary, DuckDuckGo fallback. Returns titles, URLs, snippets. Hard-capped at 5 results. Usage logged to `usage.json` with monthly rollover and a soft cap of 950/1,000 on Tavily. |
+| `fetch_url`        | crawl4ai headless Chromium -- clean markdown from any URL. Subject to 30 s Action-layer timeout; Decision falls back to `web_search` or the next URL on `[tool_timeout]`.                |
+| `get_time`         | Current time in any IANA timezone (e.g. `"Asia/Tokyo"`)                                                                                                                                  |
+| `currency_convert` | Live rates via Frankfurter API                                                                                                                                                           |
+| `read_file`        | Read a UTF-8 file from `sandbox/`                                                                                                                                                        |
+| `list_dir`         | List contents of a `sandbox/` directory                                                                                                                                                  |
+| `create_file`      | Create a new file in `sandbox/` (errors if already exists; parent directory must exist)                                                                                                  |
+| `update_file`      | Overwrite an existing `sandbox/` file                                                                                                                                                    |
+| `edit_file`        | Find-and-replace inside a `sandbox/` file                                                                                                                                                |
+
 
 All file tools are sandboxed to `sandbox/` — path traversal outside that directory is blocked. The `sandbox/memory/` subdirectory is pre-created by `agent.py` at the start of every run so `create_file("memory/key.txt", ...)` always succeeds without a manual setup step.
 
 ### Search provider chain
 
-| Priority | Provider | Key env var | Free tier |
-|---|---|---|---|
-| 1 | Tavily | `TAVILY_API_KEY` | 1,000 searches/mo |
-| 2 | DuckDuckGo | *(none)* | Free, rate-limited |
+
+| Priority | Provider   | Key env var      | Free tier          |
+| -------- | ---------- | ---------------- | ------------------ |
+| 1        | Tavily     | `TAVILY_API_KEY` | 1,000 searches/mo  |
+| 2        | DuckDuckGo | *(none)*         | Free, rate-limited |
+
 
 Provider errors and usage counts are tracked in `usage.json` (monthly rollover). Tavily is skipped automatically once its monthly count reaches 950.
 
@@ -1143,7 +1137,7 @@ Provider errors and usage counts are tracked in `usage.json` (monthly rollover).
 
 ### Search reliability
 
-Without a Tavily key, DuckDuckGo is the only search provider — it is free but rate-limited and sometimes returns empty results. For consistent results add a Tavily API key (1,000 free searches/month at <https://app.tavily.com/>).
+Without a Tavily key, DuckDuckGo is the only search provider — it is free but rate-limited and sometimes returns empty results. For consistent results add a Tavily API key (1,000 free searches/month at [https://app.tavily.com/](https://app.tavily.com/)).
 
 ### Rate limit headroom
 

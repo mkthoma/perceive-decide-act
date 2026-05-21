@@ -120,6 +120,16 @@ def _is_synthesis_goal(text: str) -> bool:
     return bool(words & _SYNTHESIS_KW)
 
 
+def _is_internal_goal(text: str) -> bool:
+    """True when a goal is an internally-injected housekeeping step.
+
+    These goals produce status messages ("created memory/mom_birthday.txt"),
+    not user-facing answers.  Their answers must be excluded from final output.
+    """
+    lower = text.lower()
+    return lower.startswith("save fact to memory/") or "with create_file:" in lower
+
+
 def _is_acquisition_goal(text: str) -> bool:
     """True when a goal is satisfied purely by executing the tool call.
 
@@ -198,8 +208,8 @@ def _final_answer_from(history: list[dict], goals: list[Goal]) -> str:
         # as there were prior answered goals feeding into it.
         synth_text = answer_by_goal[last_answered_goal.id]
 
-        # Count numbered items in the synthesis answer (1. / 2. / 3. pattern)
-        _numbered = len(re.findall(r"(?m)^\s*\d+\.", synth_text))
+        # Count list items in the synthesis answer (numbered 1. or bullet * - •)
+        _numbered = len(re.findall(r"(?m)^\s*(?:\d+\.|\*|-|•)\s+\S", synth_text))
         # Count prior non-synthesis answered goals (the "options" that should be listed)
         _prior_count = sum(
             1 for g in goals
@@ -210,7 +220,9 @@ def _final_answer_from(history: list[dict], goals: list[Goal]) -> str:
 
         # If the synthesis answer has fewer numbered items than prior data goals,
         # it dropped some options — prepend the prior answers so nothing is lost.
-        if _prior_count >= 1 and _numbered < _prior_count:
+        # Only applies when _prior_count >= 2: a synthesis about a *single* data
+        # goal is inherently self-contained and never "drops" an option.
+        if _prior_count >= 2 and _numbered < _prior_count:
             prior_answers = [
                 answer_by_goal[g.id]
                 for g in goals
@@ -220,20 +232,24 @@ def _final_answer_from(history: list[dict], goals: list[Goal]) -> str:
                 return "\n\n".join(prior_answers) + "\n\n" + synth_text
         return synth_text
 
-    # No integrating final goal — join all answers in goal order.
-    # Use double newline (not ---) so the output reads as one cohesive response.
+    # No integrating final goal — join answers in goal order, skipping:
+    #   • internally-injected housekeeping goals (memory-write stubs)
+    #   • "Task completed." placeholder answers
+    _PLACEHOLDER = {"task completed.", "task completed"}
     ordered: list[str] = []
     seen: set[str] = set()
     for g in goals:
-        if g.id in answer_by_goal:
-            ordered.append(answer_by_goal[g.id])
+        if g.id in answer_by_goal and not _is_internal_goal(g.text):
+            ans = answer_by_goal[g.id]
+            if ans.strip().lower() not in _PLACEHOLDER:
+                ordered.append(ans)
             seen.add(g.id)
-    # Append any orphaned answers not matched to a current goal
+    # Append orphaned answers not matched to any current goal
     for gid, ans in answer_by_goal.items():
-        if gid not in seen:
+        if gid not in seen and ans.strip().lower() not in _PLACEHOLDER:
             ordered.append(ans)
 
-    return "\n\n".join(ordered)
+    return "\n\n".join(ordered) if ordered else next(iter(answer_by_goal.values()))
 
 
 def _print_goals(goals: list[Goal]) -> None:
@@ -279,9 +295,9 @@ async def run(query: str) -> str:
                 mcp_tools = _mcp_tools_for_decision(tools_result.tools)
 
                 while it <= MAX_ITERATIONS:
-                    # Fast-path exit: if all goals are already marked done from
-                    # the previous iteration, skip the Perception LLM call and
-                    # break immediately — saves one gateway round-trip per query.
+                    # Fast-path exit: if every goal is already done, skip the
+                    # Perception call — there is nothing left to update and the
+                    # loop would break on obs.all_done immediately afterwards.
                     if it > 1 and prior_goals and all(g.done for g in prior_goals):
                         print("\n[done] all goals satisfied")
                         break
@@ -290,22 +306,28 @@ async def run(query: str) -> str:
                     hits = memory.read(query, history)
 
                     # ── Perception ─────────────────────────────────────────── #
-                    # Only call Perception on the first iteration to decompose
-                    # the query into goals.  On subsequent iterations the done
-                    # flags are already managed by agent.py (set immediately when
-                    # Decision answers or a tool auto-completes an acquisition
-                    # goal), so another LLM call would return the same goal list
-                    # unchanged — wasteful when free-tier providers are scarce.
-                    if it == 1:
-                        try:
-                            obs = await perception.observe(
-                                query, hits, history, prior_goals, run_id
-                            )
-                        except Exception as exc:
+                    # Perception runs every iteration per the architecture spec:
+                    #   iter 1 — decompose query into goals
+                    #   iter 2+ — update done flags from history evidence,
+                    #             set artifact_index for the next unfinished goal
+                    # On failure after iter 1 we fall back to prior_goals rather
+                    # than aborting, so a transient provider error is recoverable.
+                    try:
+                        obs = await perception.observe(
+                            query, hits, history, prior_goals, run_id
+                        )
+                    except Exception as exc:
+                        if it == 1:
                             print(f"\n[agent] ERROR in perception: {exc}")
                             fatal_error = str(exc)
                             break
-                        prior_goals = obs.goals
+                        # iter 2+: safe fallback — keep prior goals unchanged
+                        print(f"\n[agent] WARNING: perception failed (iter {it}), reusing prior goals: {exc}")
+                        obs = Observation(goals=list(prior_goals))
+
+                    prior_goals = obs.goals
+
+                    if it == 1:
                         # Guard: memory hits from prior runs can make Gemini think
                         # the task is already complete before any work this run.
                         for g in prior_goals:
@@ -318,8 +340,6 @@ async def run(query: str) -> str:
                             _has_memory_write_intent(query)
                             and not _has_memory_write_goal(prior_goals)
                         ):
-                            # Use the first sentence of the query as the fact
-                            # descriptor (strip trailing filler phrases).
                             _fact = query.split(".")[0].strip()
                             save_goal = Goal(
                                 id=uuid.uuid4().hex[:8],
@@ -328,10 +348,6 @@ async def run(query: str) -> str:
                             )
                             prior_goals.insert(0, save_goal)
                             print(f"  [agent] injected memory-write goal: {save_goal.text}")
-
-                    else:
-                        # Reuse prior_goals directly — no LLM call needed.
-                        obs = Observation(goals=list(prior_goals))
 
                     print(f"\n--- iter {it} ---")
                     _print_goals(obs.goals)
@@ -420,10 +436,22 @@ async def run(query: str) -> str:
                         preview = answer_text[:200]
                         print(f"  [decision] ANSWER: {preview}{'...' if len(answer_text) > 200 else ''}")
 
-                        # Guard: some models emit __NO_ANSWER__ instead of extracting
-                        # data from attached artifacts.  Inject a STOP hint and retry.
-                        if "__NO_ANSWER__" in answer_text:
-                            print(f"  [decision] no-answer sentinel — injecting STOP hint")
+                        # Guard: reject placeholder / thin answers — these must NOT
+                        # mark the goal done.  Inject a STOP hint and retry instead.
+                        # Covers both explicit sentinels (__NO_ANSWER__) and the
+                        # model's default fallback ("Task completed.") that slips
+                        # through when no real answer is produced.
+                        _THIN_ANSWERS = {
+                            "__no_answer__", "task completed.", "task completed",
+                            "n/a", "none", "done.", "done",
+                        }
+                        _is_thin = (
+                            "__NO_ANSWER__" in answer_text
+                            or answer_text.lower().strip() in _THIN_ANSWERS
+                            or len(answer_text.split()) < 4
+                        )
+                        if _is_thin:
+                            print(f"  [decision] thin/placeholder answer — injecting STOP hint")
                             history.append(
                                 {
                                     "iter": it,
@@ -448,12 +476,13 @@ async def run(query: str) -> str:
                                 "iter": it,
                                 "kind": "answer",
                                 "goal_id": goal.id,
+                                "goal_text": goal.text,   # lets Perception match by text
                                 "text": answer_text,
                             }
                         )
-                        # Mark done immediately — don't rely on Perception to infer it
-                        # from history. Sticky-done in Perception will preserve this.
-                        goal.done = True
+                        # Per spec: marking goals done is Perception's responsibility.
+                        # Perception reads this answer event from history on the next
+                        # iteration and sets done=True via evidence matching.
                         it += 1
                         continue
 
@@ -495,13 +524,9 @@ async def run(query: str) -> str:
                         it += 1
                         break  # exit inner while → outer loop will reconnect
 
-                    # Auto-complete acquisition goals on successful tool execution.
-                    # "Fetch the Wikipedia page" is done once fetch_url returns data;
-                    # no LLM answer is needed. This prevents Decision from looping
-                    # trying to re-read an artifact handle it can't use as a path.
-                    # Only fire for data-retrieval tools — utility tools like get_time
-                    # or currency_convert should not auto-complete a "search" goal
-                    # just because they returned a value.
+                    # Per spec: marking goals done is Perception's responsibility.
+                    # The loop records tool results in history; Perception reads them
+                    # on the next iteration and updates done flags via evidence matching.
                     is_error = result_text.startswith("[") and (
                         "error" in result_text[:80].lower()
                         or "timeout" in result_text[:80].lower()
@@ -511,11 +536,38 @@ async def run(query: str) -> str:
                         "no results found" in result_text[:80].lower()
                         or result_text.strip() in ("(empty directory)", "[]", "null", "")
                     )
-                    if (not is_error and not is_empty
-                            and _is_acquisition_goal(goal.text)
-                            and tc.name in _AUTO_DONE_TOOLS):
-                        goal.done = True
-                        print(f"  [auto-done] acquisition goal satisfied by tool call")
+
+                    # Hard-stop same-artifact loop: if the same artifact has already
+                    # been returned 2+ times for this goal, the model is stuck on
+                    # an insufficient source — treat it as exhausted so Decision
+                    # must answer from knowledge or try a different strategy.
+                    if art_id and not is_error:
+                        repeated_artifact = sum(
+                            1 for h in history
+                            if h.get("kind") == "action"
+                            and h.get("goal_id") == goal.id
+                            and h.get("artifact_id") == art_id
+                        )
+                        if repeated_artifact >= 2:
+                            print(f"  [loop-break] same artifact {art_id[:16]} returned 3× — forcing answer")
+                            history.append(
+                                {
+                                    "iter": it,
+                                    "kind": "action",
+                                    "goal_id": goal.id,
+                                    "tool": tc.name,
+                                    "arguments": tc.arguments,
+                                    "result_descriptor": (
+                                        result_text[:200]
+                                        + " [SEARCH_EXHAUSTED: same result returned 3 times."
+                                        " Do NOT search again — answer from available context"
+                                        " or your own knowledge.]"
+                                    ),
+                                    "artifact_id": art_id,
+                                }
+                            )
+                            it += 1
+                            continue
 
                     # Hard-stop repeated empty searches: if the last 3 actions for
                     # this goal all returned "No results found", skip further tool

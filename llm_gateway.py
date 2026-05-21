@@ -140,6 +140,27 @@ def _strip_titles(schema: dict) -> dict:
     return cleaned
 
 
+_THINK_BLOCK_RE = re.compile(r"<think>[\s\S]*?</think>\s*", re.IGNORECASE)
+_THINK_TAIL_RE = re.compile(r"^[\s\S]*?</think>\s*", re.IGNORECASE)
+
+
+def _strip_thinking(text: str) -> str:
+    """Remove <think>...</think> reasoning blocks that some models emit.
+
+    Handles two cases:
+    - Full block: <think>...</think>  (DeepSeek-R1, Qwen-QwQ style)
+    - Orphaned tail: ...thinking...</think>  (provider adapter stripped <think>)
+    """
+    if not text or "</think>" not in text.lower():
+        return text
+    if "<think>" in text.lower():
+        text = _THINK_BLOCK_RE.sub("", text)
+    else:
+        # No opening tag — everything up to and including </think> is thinking
+        text = _THINK_TAIL_RE.sub("", text)
+    return text.strip()
+
+
 def _is_garbage_text(text: str) -> bool:
     """Return True when text looks like garbled/incoherent model output.
 
@@ -307,7 +328,7 @@ async def chat(
             # Only fires for plain text (no tool calls, no structured output).
             # Marks the offending provider unavailable for 90 s and retries
             # the next candidate so callers never see garbage output.
-            _raw_text = result.get("text", "")
+            _raw_text = _strip_thinking(result.get("text", ""))
             if _raw_text and not result.get("tool_calls") and not response_format:
                 if _is_garbage_text(_raw_text):
                     router.state[name].mark_unavailable(90, "garbage_output_detected")
@@ -342,7 +363,7 @@ async def chat(
             return {
                 "provider": name,
                 "model": result.get("model", name),
-                "text": result.get("text", ""),
+                "text": _raw_text,
                 "tool_calls": normalized,
                 "stop_reason": result.get("stop_reason", "end_turn"),
                 "input_tokens": result.get("input_tokens", 0),

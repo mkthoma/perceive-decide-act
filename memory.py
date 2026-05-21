@@ -102,6 +102,14 @@ EXAMPLES:
   Reasoning: subjective user preference → kind=preference, preference parsing.
   Output: {"kind":"preference","keywords":["dark","mode","code","editor","ui"],"descriptor":"User prefers dark mode in code editors","value":{"topic":"code editor UI","preference":"dark mode"}}
 
+  Input: "web_search returned: {title: 'Paris', snippet: 'Capital of France'}"
+  Reasoning: direct output of a tool execution → kind=tool_outcome.
+  Output: {"kind":"tool_outcome","keywords":["web","search","paris","capital","france"],"descriptor":"web_search result: Paris is capital of France","value":{"tool":"web_search","result":"Paris - Capital of France"}}
+
+  Input: "maybe follow up on the Tokyo itinerary later"
+  Reasoning: vague working note, no verifiable entity+attribute+value → kind=scratchpad.
+  Output: {"kind":"scratchpad","keywords":["tokyo","itinerary","follow","up"],"descriptor":"Reminder to follow up on Tokyo itinerary","value":{"text":"maybe follow up on the Tokyo itinerary later"}}
+
 ERROR HANDLING:
   - Unsure between "fact" and "scratchpad"? Choose "fact" when the statement contains a verifiable entity+attribute+value triple; otherwise "scratchpad".
   - Unsure between "preference" and "fact"? "Preference" if first-person and subjective; "fact" if third-person and verifiable.
@@ -265,6 +273,16 @@ class Memory:
         self._items.append(item)
         self._save()
         return item
+
+    def clear(self) -> None:
+        """Wipe the in-RAM cache only.
+
+        Disk files (state/memory.json, sandbox/memory/*.txt) are untouched so
+        the agent must re-discover facts via read_file / list_dir tool calls.
+        Useful in tests to verify the agent reads from disk rather than from
+        a warm in-process cache.
+        """
+        self._items = []
 
     def record_outcome(
         self,
